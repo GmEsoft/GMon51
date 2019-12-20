@@ -1,0 +1,77 @@
+;___________________________________________________
+; Version	: 
+; Date		: 03 fevrier 1991
+; Auteur	: Jean Morren
+; Objet		: Exemple d'utilisation des utilitaires emon16
+;___________________________________________________
+;
+
+;Options pour l'asembleur
+	lstxrf
+	locsym+
+;___________________________________________________________________________;
+
+$gmon2vec.inc
+;
+cr	equ	0dh
+lf	equ	0ah
+;
+; Variables 
+	rseg	data
+x	ds	4
+y	ds	2
+;
+	aseg
+	org	chksig	;signature pour autorun: AA5A doit etre present
+	DB	0AAH,5AH
+	
+	org	usercode
+debut	clr	a
+	mov	x+2,a	;clear 16 bits msb
+	mov	x+3,a
+	mov	dptr,#txt0
+	lcall	stxt
+	lcall	get10i	;lire nb1	
+	mov	x,@r0	;sauver en x le nb1
+	inc	r0
+	mov	x+1,@r0
+	mov	dptr,#txt1
+	lcall	stxt
+	lcall	get10i	;lire nb2
+	mov	y,@r0	;sauver en y le nb2
+	inc	r0
+	mov	y+1,@r0
+	mov	r0,#x
+	mov	r1,#y
+	lcall	div16	;((r0))=quotient et ((r1))=reste
+	mov	y,@r1	;sauver le reste en y
+	inc	r1
+	mov	y+1,@r1
+	mov	x,@r0	;sauver le quotient en x
+	inc	r0
+	mov	x+1,@r0
+	mov	dptr,#txt2
+	lcall	stxt
+	mov	r0,#x	;pointer le quotient
+	lcall	dsp16d
+	lcall	crlf
+	mov	dptr,#txt3
+	lcall	stxt
+	mov	r0,#y	;pointer le reste
+	lcall	dsp16d
+	lcall	crlf
+	lcall	crlf
+	lcall	crlf
+	lcall	snap
+;	lcall	dbgbrk
+fin	ljmp	debut	;recommencer
+;
+;
+txt0	db	'Exemple d''utilisation des utilitaires emon16',cr,lf
+	db	'introduisez un premier nombre entre 0..64000',cr,lf,0
+txt1	db	'introduisez un second  nombre entre 0..64000',cr,lf,0
+txt2	db	'le quotient = ',0
+txt3	db	'le reste    = ',0
+
+	end	debut
+

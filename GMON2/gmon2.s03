@@ -1,0 +1,3962 @@
+;=============================================================================
+; Module        : GMON2 - GMON51 version 2
+; Version       : v2.0b2 - 11-Apr-2010 
+; Author        : Michel Bernard - mailto:michel.bernard@advalvas.be
+; Object        : 8051 Family Monitor/Debugger/Disassembler
+; Requires	: -
+; Target        : 8051 family
+; Assembler	: Micro Series 8051 Assembler 2.02/DOS - IAR 1990
+; Copyright (c) 2010 GmE Belgium - All Rights Reserved
+;		: Redistribution and use in source and binary forms, with or 
+;		: without modification, are permitted provided that the 
+;		: following conditions are met:
+;		: 1. Redistributions of source code must retain the above 
+;		: copyright notice, this list of conditions and the following 
+;		: disclaimer.
+;		: 2. Redistributions in binary form must reproduce the above 
+;		: copyright notice, this list of conditions and the following 
+;		: disclaimer in the documentation and/or other materials 
+;		: provided with the distribution.
+;		: 3. The name of the author may not be used to endorse or 
+;		: promote products derived from this software without specific 
+;		: prior written permission.
+; Disclaimer	: This software is in its early alpha stage.  It's not meant 
+;		: to be used for production code, and the API might change in 
+;		: the future.  Despite this, it might be useful in some 
+;		: situations and you are encouraged to try it by yourself. 
+;		: Suggestions, bug-reports and even better patches are welcome.
+;		: THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS 
+;		: OR IMPLIED WARRANTY.  IN PARTICULAR, NEITHER THE AUTHOR NOR 
+;		: GmE MAKES ANY REPRESENTATION OR WARRANTY OF ANY KIND 
+;		: CONCERNING THE MERCHANTABILITY OF THIS SOFTWARE OR ITS 
+;		: FITNESS FOR ANY PARTICULAR PURPOSE.
+;=============================================================================
+
+$sfr552.inc
+;
+; Segmentation :    name      type      offset for simcad   usage
+; ==============    ----      ----      -----------------   -----
+;                   datasim   stack     7FH                 var and stack emon
+;                   ramcoda   rseg      2000H               users vectors
+;                                                           and user code
+;                   code      rseg      0                   code of monitor
+;                   const     rseg      0                   ASCII const emon
+;
+;
+	  lstxrf
+	  locsym+
+
+
+;=====	CONFIGURATION  =====	  
+;
+;configurable defaults for debugger
+VEC	equ	1	;default interrupt vectors in object file
+DBGINT	equ	1	;int for debugger: 0 (INT0) or 1 (INT1)
+PAUTO	equ	P1.1	;usercode is run if given bit is low
+SERINT	equ	0	;enable invocation of debugger via serial interrupt when Ctrl-D typed
+P80C552	equ	1	;processor is Philips 80C552
+
+
+;=====	DEFINES  =====
+
+PCON    equ     087H
+TH2	equ	cth1
+TL2	equ	cth0
+RCAP2H	equ	cmh2
+RCAP2L	equ	cmh1
+T2CON	equ	tm2ir
+
+;bits for debugger
+RETIFLG	equ	28	;set when INT active => if set use RETI else use RET
+SINTDBG	equ	29	;SERINT intercepted when this bit set
+INT0DBG	equ	30	;INT0 intercepted when this bit set
+INT1DBG	equ	31	;INT1 interrupt intercepted when this bit set
+
+;indirect data addresses for debugger 
+DEBUGSP	equ	0C0h	;debugger stack 		16 bytes
+SAVERAM	equ	0D0H	;backup Reg banks 1-3		24 bytes
+MODE	equ	0E8H	;Debug mode 			1 byte
+SAVESP	equ	0EDH	;SP value for call step		1 byte
+SAVERET	equ	0EEH	;Ret address for call step	2 bytes
+SAVEREG	equ	0F0H	;backup for R0-R7		8 bytes
+SAVESFR	equ	0F8H	;backup for PC and SFRs		8 bytes
+
+
+INTBIT	equ	INT0DBG+DBGINT
+
+
+;______________________________________
+	  rseg      ramcoda
+if VEC
+
+ramcodastart:
+rstvec:	ljmp	usercode
+int0vec:ljmp	inte0
+	ds	5
+tmr0vec:ljmp	intf0
+	ds	5
+int1vec:ljmp	inte1
+	ds	5
+tmr1vec:ljmp	intf1
+	ds	5
+serintvec:ljmp	intrt
+	ds	5
+if P80C552
+sio1vec:ljmp	intrt1
+	ds	5	;liaison I²C
+t2cap0vec:ljmp	intc0
+	ds	5	;capture 0 timer 2
+t2cap1vec:ljmp	intc1
+	ds	5	;        1
+t2cap2vec:ljmp	intc2
+	ds	5	;        2
+t2cap3vec:ljmp	intc3
+	ds	5	;        3
+adccomvec:ljmp	intadc
+	ds	5	;fin de conversion
+t2com0vec:ljmp	intcm0
+	ds	5	;comparaison 0 timer 2
+t2com1vec:ljmp	intcm1
+	ds	5	;            1
+t2com2vec:ljmp	intcm2
+	ds	5	;            2
+endif
+tmr2vec:ljmp	intf2
+	ds	5	;timer 2 overflow du 552
+
+else
+
+ramcodastart:
+rstvec    ds        3
+int0vec   ds        8
+tmr0vec   ds        8
+int1vec   ds        8
+tmr1vec   ds        8
+serintvec ds        8
+if P80C552
+sio1vec   ds        8       ;liaison I²C
+t2cap0vec ds        8       ;capture 0 timer 2
+t2cap1vec ds        8       ;        1
+t2cap2vec ds        8       ;        2
+t2cap3vec ds        8       ;        3
+adccomvec ds        8       ;fin de conversion
+t2com0vec ds        8       ;comparaison 0 timer 2
+t2com1vec ds        8       ;            1
+t2com2vec ds        8       ;            2
+endif
+tmr2vec   ds        8       ;timer 2 overflow du 552
+
+endif
+
+	  org       ramcodastart+0FEh
+chksig:   ds        2       ;signature for autorun: check for AA5A
+	  org       ramcodastart+100h
+usercode  equ	    $
+
+
+;______________________________________
+	  rseg      code
+	  ljmp      START
+;
+; all interrupt linked via LJMP table at begin of segment ramcoda 
+; 2000H for ELEKTOR 80C552
+;
+vecint0 jb	INT0DBG,veci00
+	ljmp    int0vec
+	ds	2
+
+vectmr0 ljmp    tmr0vec
+veci00:	ljmp	XINT0
+	ds	2
+
+vecint1 jb	INT1DBG,veci10
+	ljmp    int1vec
+	ds	2
+
+vectmr1 ljmp    tmr1vec
+veci10:	ljmp	XINT0
+	ds	2
+
+vecserint:
+	jb	SINTDBG,vecs00
+	ljmp    serintvec 
+	ds	2
+
+if P80C552
+
+vecint2 equ     $
+veci2cint:
+	ljmp    sio1vec	
+vecs00:	ljmp	XSERINT
+	ds	2
+
+cap0int ljmp    t2cap0vec
+	ds	5
+
+cap1int ljmp    t2cap1vec
+	ds	5
+
+cap2int ljmp    t2cap2vec 
+	ds	5
+
+cap3int ljmp    t2cap3vec 
+	ds	5
+
+adcint  ljmp    adccomvec
+	ds	5
+
+com0int ljmp    t2com0vec
+	ds	5
+
+com1int ljmp    t2com1vec
+	ds	5
+
+com2int ljmp    t2com2vec
+	ds	5
+vectmr2 ljmp    tmr2vec
+
+else
+
+vectmr2 ljmp    tmr2vec
+vecs00:	ljmp	XSERINT
+	ds	2
+
+endif
+
+
+
+;=====	VECTORS  =====
+;	<VEC>
+	ljmp	stime		;write time to RTC OKI MSM6242
+	ljmp	ltime		;read time from RTC OKI MSM6242
+	ljmp	snap		;snap registers
+	ljmp	add16		;op1(16b) = word@r0 + word@r1 ; r0 = #op1
+	ljmp	sub16		;op1(16b) = word@r0 - word@r1 ; r0 = #op1
+	ljmp	mul16		;prod(16b) = word@r0 * word@r1 ; r0 = #prod
+	ljmp	div16		;word@r0 = dword@r0 / word@r1 ; word@r1 = dword@r0 mod word@r1 
+	ljmp	abs16		;word@r0 = abs( word@r0 )
+	ljmp	neg16		;word@r0 = -word@r0
+	ljmp	hex16		;hex disp dptr
+	ljmp	dsp32d		;dec disp dword@r0
+	ljmp	dsp32h		;hex disp dword@r0
+	ljmp	dsp16d		;dec disp word@r0
+	ljmp	dsp16h		;hex disp word@r0
+	ljmp	iniacc		;init buffer for bin to bcd conversion
+	ljmp	bindec		;convert byte@r0 to bcd in buffer; ++r0
+	ljmp	dspx		;disp bcd value in buffer
+	ljmp	link		;link interrupt vector
+	ljmp	add16s		;add word @r1 to word @r0
+	ljmp	clr16		;clear word@r0
+	ljmp	shl16		;left shift word@r0
+	ljmp	get16		;hex read word@r0 without echo until non-hex char
+	ljmp	get2h		;hex read byte@r0 without echo until non-hex char
+	ljmp	get2he		;hex read byte@r0 with echo until non-hex char
+	ljmp	echo		;echo byte, add <lf> to <cr>
+	ljmp	get16i		;hex read word@r0 with prompt 'H>' and echo until non-hex char
+	ljmp	get10i		;dec read word@r0 with prompt 'D>' and echo until non-hex char
+	ljmp	get1d		;dec read 1 digit without echo
+	ljmp	get1de		;dec read 1 digit with echo
+	ljmp	get1h		;hex read 1 digit without echo
+	ljmp	get1he		;hex read 1 digit with echo
+	ljmp	stxt		;disp null terminated text @dptr
+	ljmp	blank		;disp blank
+	ljmp	byte		;hex disp byte in A
+	ljmp	crlf		;disp CR/LF
+	ljmp	getupc		;read char to A and convert to upper case
+	ljmp	upcase		;convert char in A to upper case
+	ljmp	snd		;disp char in A
+	ljmp	getchr		;read char to A; Ctrl-D invokes debugger
+	ljmp	testc		;test if char received (A != 0 if true)
+	ljmp	dbgbrk		;break into debugger
+	ljmp	dbgsnap		;snapshot SFRs via debugger
+	ljmp	dbgcont		;continue from debugger
+	ljmp	DASM1		;disasemble code from 18:19 to 1A:1B
+	ljmp	DDISA		;disp char in A
+	ljmp	DDISNL		;disp new line (A saved)
+	ljmp	DHEXB		;hex disp byte in A
+	ljmp	DHEXW		;hex disp word in R2:R3
+	ljmp	WAITKI		;wait char from serial line; Ctrl-C aborts
+	ljmp	DHITKI		;get char from serial line with XON/XOFF; Ctrl-C aborts
+;	</VEC>
+
+;______________________________________
+;      default interrupt handlers
+;
+inte0  MOV   ien0,#0           ; disable all interrups
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT1
+       LCALL stxt
+       LJMP  STOP1
+inte1  MOV   ien0,#0           ; disable all interrups
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT2
+       LCALL stxt
+       LJMP  STOP1
+intf0  MOV   ien0,#0           ; disable all interrups
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT3
+       LCALL stxt
+       LJMP  STOP1
+intf1  MOV   ien0,#0           ; disable all interrups
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT4
+       LCALL stxt
+       LJMP  STOP1
+intrt  MOV   ien0,#0           ; disable all interrups
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT5
+       LCALL stxt
+       LJMP  STOP1
+
+if P80C552      
+
+intrt1 MOV   ien0,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT6
+       LCALL stxt
+       LJMP  STOP1
+intc0  MOV   ien1,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT7
+       LCALL stxt
+       LJMP  STOP1
+intc1  MOV   ien1,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT8
+       LCALL stxt
+       LJMP  STOP1
+intc2  MOV   ien1,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT9
+       LCALL stxt
+       LJMP  STOP1
+intc3  MOV   ien1,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT10
+       LCALL stxt
+       LJMP  STOP1
+intadc MOV   ien0,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT11
+       LCALL stxt
+       LJMP  STOP1
+intcm0 MOV   ien1,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT12
+       LCALL stxt
+       LJMP  STOP1
+intcm1 MOV   ien1,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT13
+       LCALL stxt
+       LJMP  STOP1
+intcm2 MOV   ien1,#0
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT14
+       LCALL stxt
+       LJMP  STOP1
+
+endif
+
+intf2  MOV   ien1,#0           ; disable all interrups
+       MOV   DPTR,#ITXT
+       LCALL stxt
+       MOV   DPTR,#ITXT15
+       LCALL stxt
+       LJMP  STOP1
+;
+
+;
+STOP1  LJMP START
+
+
+
+;=====	LOW LEVEL I/O ROUTINES  =====
+
+;-----	Get keystroke if any
+DHITKI:
+	clr	a
+	jnb	RI,DHITKI0
+	mov	a,SBUF
+	clr	RI
+	cjne	a,#03H,DHITKI1
+
+	clr	a
+	ljmp	INIT
+
+DHITKI1:
+	cjne	a,#13H,DHITKI0
+
+DHITKI2:
+	lcall	WAITKI
+	cjne	a,#11H,DHITKI2
+
+DHITKI0:
+	ret
+
+;-----	Wait keystroke
+WAITKI:
+	push	IE
+	clr	ES
+	clr	EX0+DBGINT+DBGINT
+	jnb	RI,$
+	mov	a,SBUF
+	clr	RI
+	pop	IE
+	clr	acc.7
+	cjne	a,#03H,DHITKI0
+	clr	a
+	ljmp	INIT
+
+;----- Display character in A
+DDISA:
+	push	IE
+	clr	ES
+	clr	EX0+DBGINT+DBGINT
+	jnb	TI,$
+	clr	TI
+	mov	SBUF,a
+	pop	IE
+	ret
+
+;-----	Display space
+DDISSP:	mov	a,#20H		;' '
+	sjmp	DDISA
+
+;-----	Display 'H'
+DDISH:	mov	a,#48H		;'H'
+	sjmp	DDISA
+
+;-----  Tab A chars
+DTABS:	clr	C
+	subb	a,R0
+	mov	R0,a
+DTABS0:	lcall	DDISSP
+	djnz	R0,DTABS0
+	ret
+
+;-----	Display new line
+DDISNL:	push	acc
+	mov	a,#0DH		;<cr>
+	lcall	DDISA
+	mov	a,#0AH		;<nl>
+	lcall	DDISA
+	pop	acc
+	ret
+
+;-----	Display text @ DPTR in code memory, terminated by "
+DTEXT:	push	acc
+DTEXT0:	clr	a
+	movc	a,@A+dptr
+	cjne	a,#22H,DTEXT1
+	pop	acc
+	ret
+DTEXT1:	inc	dptr
+	lcall	DDISA
+	sjmp	DTEXT0
+
+
+
+;-----	Hex Output word in R2:R3
+; in:	bit 36h: 0=dump
+;	R0: digit counter
+; out	R0: digit counter (updated)
+
+DHEXW:	clr	36H
+	mov	a,R2
+	lcall	DHEXB
+	mov	a,R3
+	sjmp	DHEXB
+
+;-----	Hex Output word in DPTR and 0 if null
+; in:	bit 36h: output mode: 1=assembler, 0=dump
+;	R0: digit counter
+; out	R0: digit counter (updated)
+
+DHEXDP:	
+	mov	R0,#0
+	mov	a,DPH
+	lcall	DHEXB
+	mov	a,DPL
+DHEXD0:	lcall	DHEXB
+	cjne	R0,#0,DHEXW1
+	mov	a,#30H		;send 0 if no digit sent
+	lcall	DDISA
+
+DHEXW1:
+	ret
+
+
+;-----	Hex Output byte in ACC and 0 if null
+; in:	bit 36h: output mode: 1=assembler, 0=dump
+;	R0: digit counter
+; out	R0: digit counter (updated)
+DHEXA:
+	mov	R0,#0
+	sjmp	DHEXD0
+
+;-----	Hex Output byte in ACC
+; in:	bit 36h: output mode: 1=assembler, 0=dump
+;	R0: digit counter
+; out	R0: digit counter (updated)
+DHEXB:
+	push	ACC
+	swap	a
+	lcall	DHEXN
+	pop	ACC
+
+;-----	Hex Output low nibble in ACC
+; in:	bit 36h: output mode: 1=assembler, 0=dump
+;	R0: digit counter (updated)
+;	bit 36h == 1 and R0 == 0: don't output digit
+;	bit 36h == 1 and R0 == 0 and nibble >= 0AH: precede digit with 0
+; out:	++R0 if digit has been sent
+DHEXN:
+	anl	a,#0FH
+	jnz	DHEXN0
+	cjne	R0,#0,DHEXN0
+	jnb	36H,DHEXN0
+	ret
+
+DHEXN0:
+	clr	C
+	subb	a,#0AH
+	jc	DHEXN1		;jump if 0-9
+	add	a,#7
+	cjne	R0,#0,DHEXN1	;R0 != 0: don't output 0
+	jnb	36H,DHEXN1	;bit 36H == 0: don't output 0
+	push	ACC
+	mov	a,#30H		;output 0 before A-F
+	lcall	DDISA
+	pop	ACC
+
+DHEXN1:
+	add	a,#3AH		;output digit
+	inc	R0
+	ljmp	DDISA
+
+
+
+
+;=====	MAIN PROGRAM  =====
+
+
+;______________________________________
+; main program starts here
+;
+START:
+       	mov   	sp,#stk
+ 	mov   	PSW,#0          ; reset register banks
+       	mov   	PCON,#080H      ; SMOD=1
+       	mov   	TMOD,#22H       ; modes are timer
+       	mov   	TH1,#(256-6)    ; preload value
+       	mov   	TL1,#(256-6)
+       	setb  	TR1		; start counter
+       	mov   	SCON,#052H      ; mode 1 , Enable receiver=10H
+       	
+;______________________________________
+; test    PAUTO (port bit)
+;       
+       JB    PAUTO,lnk       	; PAUTO  connected to ground ? if so go UP
+       MOV   DPTR,#chksig    	; check signature AA5A
+       MOVX  A,@DPTR
+       CJNE  A,#0AAH,lnk
+       INC   DPTR
+       MOVX  A,@DPTR
+       CJNE  A,#05AH,lnk
+       INC   DPTR
+       MOV   DPTR,#UPTXT
+       LCALL stxt
+       LJMP  rstvec
+;______________________________________
+; link interrupt procedures
+;
+lnk    MOV   A,#0
+       MOV   DPTR,#usercode
+       LCALL link
+       MOV   A,#1
+       MOV   DPTR,#inte0
+       LCALL link
+       MOV   A,#2
+       MOV   DPTR,#intf0
+       LCALL link
+       MOV   A,#3
+       MOV   DPTR,#inte1
+       LCALL link
+       MOV   A,#4
+       MOV   DPTR,#intf1
+       LCALL link
+       MOV   A,#5
+       MOV   DPTR,#intrt
+       LCALL link
+
+if P80C552       
+
+;Interruptions propres au 80C552       
+;
+       MOV   A,#6
+       MOV   DPTR,#intrt1
+       LCALL link
+       MOV   A,#7
+       MOV   DPTR,#intc0
+       LCALL link
+       MOV   A,#8
+       MOV   DPTR,#intc1
+       LCALL link
+       MOV   A,#9
+       MOV   DPTR,#intc2
+       LCALL link
+       MOV   A,#10
+       MOV   DPTR,#intc3
+       LCALL link
+       MOV   A,#11
+       MOV   DPTR,#intadc
+       LCALL link
+       MOV   A,#12
+       MOV   DPTR,#intcm0
+       LCALL link
+       MOV   A,#13
+       MOV   DPTR,#intcm1
+       LCALL link
+       MOV   A,#14
+       MOV   DPTR,#intcm2
+       LCALL link
+       MOV   A,#15
+       MOV   DPTR,#intf2
+       LCALL link
+
+else
+
+;       
+;Timer2 (INTF2) vectorise apres les interruptions propres au 80C552
+       MOV   A,#6
+       MOV   DPTR,#intf2
+       LCALL link
+
+endif
+
+;
+;______________________________________
+; interactive command interpreter
+;
+       	
+	mov	dptr,#TITLE
+	lcall	DTEXT
+	mov	dptr,#MSYSTEM
+	lcall	DTEXT
+
+if P80C552
+
+	mov	dptr,#M80C552
+
+else
+
+	mov	dptr,#M8052
+
+endif
+
+	lcall	DTEXT
+	mov	dptr,#MUSING
+	lcall	DTEXT
+	mov	a,#30H+DBGINT
+	lcall	DDISA
+
+if SERINT
+
+	mov	dptr,#MSERINT
+	lcall	DTEXT
+
+endif
+
+	lcall	DDISNL
+	mov	R0,#SAVESFR
+	mov	dptr,#usercode	;User code entry point
+	mov	@R0,DPH
+	inc	R0
+	mov	@R0,DPL
+
+;-----	DEBUG command entry point
+RDEBUG:
+	clr	a
+	mov	R0,#MODE
+	mov	@R0,a
+
+	clr	EA
+	setb	INTBIT
+	clr	IT0+DBGINT+DBGINT
+	setb	EX0+DBGINT+DBGINT
+
+if SERINT
+
+	setb	ES
+
+else
+
+	clr	ES
+
+endif
+
+	clr	INT0+DBGINT
+	setb	EA
+	ljmp	usercode
+
+INIT:
+	clr	EA		;disable all interrupts
+       	mov   	sp,#stk
+	mov	R0,#SAVESFR+3
+	mov	@R0,sp
+	clr	a
+	mov	R0,#MODE
+	mov	@R0,a
+
+;----- display SFRs and wait debug command	
+COMMAND:
+	mov	SP,#DEBUGSP
+	lcall	DDISNL
+;	mov	R1,#SAVESFR+3
+;	mov	a,@R1
+;	mov	SP,a
+	mov	dptr,#MSFR
+	lcall	DTEXT		;DISP MSG @ DPTR
+	lcall	DDISNL		;<CR>-<LF>
+	push	26H
+	clr	36H
+	mov	R1,#SAVESFR	;DISP -PC-
+	mov	a,@R1
+	mov	R2,a
+	inc	R1
+	mov	a,@R1
+	mov	R3,a
+	inc	R1
+	lcall	DHEXW
+	lcall	DSPC
+	mov	a,@R1		;DISP PSW
+	inc	R1
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,@R1		;DISP SP
+	inc	R1
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,@R1		;DISP ACC
+	inc	R1
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,@R1		;DISP B
+	inc	R1
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,@R1		;DISP DPTR
+	inc	R1
+	mov	R2,a
+	mov	a,@R1		
+	inc	R1
+	mov	R3,a
+	lcall	DHEXW
+	lcall	DSPC
+	mov	a,P1
+	lcall	DHEXB
+	lcall	DSPC
+	mov	R2,TH0
+	mov	R3,TL0
+	lcall	DHEXW
+	lcall	DSPC
+	mov	R2,TH1
+	mov	R3,TL1
+	lcall	DHEXW
+	lcall	DSPC
+	mov	R2,TH2
+	mov	R3,TL2
+	lcall	DHEXW
+	lcall	DSPC
+	mov	R2,RCAP2H
+	mov	R3,RCAP2L
+	lcall	DHEXW
+	lcall	DSPC
+	mov	a,TCON
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,TMOD
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,T2CON
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,IE
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,IP
+	lcall	DHEXB
+	lcall	DSPC
+	mov	a,23H		;flags
+	lcall	DHEXB
+	pop	26H
+
+;----- Entry: Disassemble and Display "Cmd:" prompt	
+COMMAND2:
+	lcall	DDISNL		;<CR>-<LF>
+	
+	;save DATA work area
+	push	26H
+	mov	R1,#SAVERAM
+	mov	R0,#10H
+	mov	B,#18H
+SAVERAM1:
+	mov	a,@R0
+	mov	@R1,a
+	inc	R0
+	inc	R1
+	djnz	B,SAVERAM1
+	
+	;disassemble single instruction
+	mov	R0,#SAVESFR
+	mov	a,@R0
+	inc	R0
+	mov	18H,a
+	mov	1AH,a
+	mov	a,@R0		
+	mov	19H,a
+	mov	1BH,a
+	lcall	DASM1		
+	
+	;restore DATA work area
+	mov	R1,#SAVERAM
+	mov	B,#18H
+	mov	R0,#10H
+SAVERAM2:
+	mov	a,@R1
+	mov	@R0,a
+	inc	R0
+	inc	R1
+	djnz	B,SAVERAM2
+	
+	pop	26H
+	
+	mov	R0,#MODE
+	mov	a,@R0
+	jnb	ACC.5,COMMAND3		;jump if not in trace mode (c/i)
+	jnb	RI,TRACE1
+	mov	a,SBUF
+	cjne	a,#1BH,TRACE1		;ESC pressed
+	clr	RI
+	mov	@R0,a
+	sjmp	COMMAND3
+	
+TRACE1:
+	mov	a,@R0
+	cjne	a,#6EH,TRACE2
+	mov	a,#63H			;n -> c
+TRACE2:
+	cjne	a,#63H,TRACE3
+	ljmp	COMC			;c => Trace call
+TRACE3:
+	cjne	a,#67H,TRACE4
+	ljmp	COMG			;g => Continue
+TRACE4:
+	cjne	a,#69H,COMMAND3
+	ljmp	COMI			;i => Trace instr
+	
+	
+;----- Entry: Display "Cmd:" prompt only
+COMMAND3:
+	mov	dptr,#MCOMMAND
+	lcall	DTEXT			;disp msg C@ dptr
+	lcall	WAITKI			;wait keystroke
+	jnb	ACC.6,COMM30
+	clr	ACC.5			;to uppercase
+COMM30:
+	lcall	DDISA			;display pressed key
+	
+	cjne	a,#5AH,COMNOZ
+	ljmp	ZAP			;(Z)ap: dump/modify Xmemory
+COMNOZ:
+	cjne	a,#2FH,COMNOSLASH
+	ljmp	COMSLASH		;(/): change register/sfr
+COMNOSLASH:
+	cjne	a,#49H,COMNOI
+	ljmp	COMI			;(I)nstruction step
+COMNOI:
+	cjne	a,#43H,COMNOC
+	ljmp	COMC			;(C)all step
+COMNOC:
+	cjne	a,#54H,COMNOT
+	sjmp	COMT			;(T)race mode
+COMNOT:
+	cjne	a,#58H,COMNOX
+	ljmp	COMMAND			;(X): display sfrs
+COMNOX:
+	cjne	a,#52H,COMNOR
+	ljmp	COMR			;(R)egisters display
+COMNOR:
+	cjne	a,#47H,COMNOG
+	ljmp	COMG			;(G)o
+COMNOG:
+	cjne	a,#48H,COMNOH
+	ljmp	COMH			;(H)ex load
+COMNOH:
+	cjne	a,#53H,COMNOS
+	ljmp	COMS			;(S)ource
+COMNOS:
+	cjne	a,#44H,COMNOD
+	ljmp	COMD			;(D)ata display
+COMNOD:
+	cjne	a,#56H,COMNOV
+	ljmp	COMV			;(V)erify RAM
+COMNOV:
+	cjne	a,#3FH,ERRCOM		;?=help
+	ljmp	DBGHLP
+	;for extensions ...
+ERRCOM:
+	mov	a,#3Fh			;'?'
+	lcall	DDISA
+	ljmp	COMMAND2
+	
+MSFR:
+	db '-PC- PS SP  A  B DPTR P1 -T0- -T1- -T2- -RC- TC TM TT IE IP ??"'
+	
+MCOMMAND:
+	db 'Cmd:"'
+
+;-----	Trace mode
+COMT:
+	lcall	WAITKI			;wait key C/I
+	lcall	DDISA
+	setb	ACC.5			;to lowercase
+	push	ACC
+	lcall	WAITKI			;wait CR
+	mov	R0,a
+	pop	ACC
+	cjne	R0,#0DH,ERRCOM		;not CR => error
+	cjne	a,#69H,COMT1
+	sjmp	COMI
+COMT1:
+	cjne	a,#63H,ERRCOM
+
+;-----	Call step/trace (UC=step, LC=trace)
+COMC:
+	lcall	DDISNL
+	mov	R0,#MODE
+	mov	@R0,a			;save mode = C (step) or c (trace)
+	clr	INT0+DBGINT
+	mov	R0,#SAVESFR		;load PC
+	mov	a,@R0
+	inc	R0
+	mov	DPH,a
+	mov	a,@R0
+	mov	DPL,a
+	clr	a
+	movc	a,@A+dptr
+	cjne	a,#12H,COMC0		;LCALL ?
+	sjmp	COMC1
+COMC0:
+	anl	a,#1FH
+	cjne	a,#11H,COMC2		;ACALL ?
+COMC1:
+	sjmp	RESUME
+COMC2:
+	mov	R0,#MODE
+	mov	a,@R0
+	mov	C,ACC.5
+	mov	a,#4EH			;'N'
+	mov	ACC.5,C
+	mov	@R0,a
+	sjmp	RESUME
+
+
+COMI:
+	clr	INT0+DBGINT
+COMG:
+	lcall	DDISNL
+	mov	R0,#MODE
+	mov	@R0,a
+RESUME:
+	mov	R0,#SAVESFR+3   ;restore SP
+	mov	sp,@R0		
+
+	mov	R0,#SAVESFR	
+	mov	b,@R0           ;PCH
+	inc	R0
+	mov	a,@R0		;PCL
+	inc	R0
+	push	ACC		;push ret address
+	push	B
+	mov	a,@R0		;PSW
+	inc	R0
+	push	ACC		;push PSW
+	inc	R0		;BYPASS SP
+	mov	a,@R0           ;ACC
+	inc	R0
+	push	ACC             ;push ACC
+	mov	b,@R0		;B
+	inc	R0
+	mov	a,@R0		;DPH
+	inc	R0
+	push	ACC		;push DPH
+	mov	a,@R0		;DPL
+	inc	R0
+	push	ACC		;push DPL
+
+	mov	R0,#SAVEREG+1	;bypass r0
+	mov	a,@R0		;R1
+	inc	R0
+	mov	R1,a
+	mov	a,@R0		;R2
+	inc	R0
+	mov	R2,a
+	mov	a,@R0		;R3
+	inc	R0
+	mov	R3,a
+	mov	a,@R0		;R4
+	inc	R0
+	mov	R4,a
+	mov	a,@R0		;R5
+	inc	R0
+	mov	R5,a
+	mov	a,@R0		;R6
+	inc	R0
+	mov	R6,a
+	mov	a,@R0		;R7
+	inc	R0
+	mov	R7,a
+
+	mov	R0,#SAVEREG
+	mov	a,@R0		;R0
+	mov	R0,a
+
+	mov	a,#SERINT
+	rrc	a
+	mov	SINTDBG,c
+
+	pop	DPL
+	pop	DPH
+	pop	ACC
+	pop	PSW
+
+	setb	INTBIT
+	clr	IT0+DBGINT+DBGINT
+	setb	EX0+DBGINT+DBGINT
+
+if SERINT
+
+	setb	ES
+
+else
+
+	clr	ES
+
+endif
+
+	jnb	RETIFLG,RESUMEX
+	clr	RETIFLG
+	setb	EA
+	reti
+RESUMEX:
+	setb	EA
+	reti
+
+XSERINT:
+	jnb	RI,NORI
+	clr	ES
+	push	ACC
+	mov	a,SBUF
+	cjne	a,#04,NOSERINT	;CTRL-D
+	pop	ACC
+	clr	RI
+	setb	RETIFLG
+	sjmp	INT
+NOSERINT:
+	pop	ACC
+	setb	ES
+NORI:
+	reti
+
+dbgcont:
+	PUSH	PSW
+	PUSH	ACC
+       	MOV   	A,R0
+       	PUSH  	ACC
+       	MOV   	R0,#MODE
+       	MOV   	A,@R0
+       	MOV   	@R0,#'g'	; go
+       	CLR   	ACC.5		; to upper case
+       	CJNE  	A,#'C',dbg1
+	SJMP	dbg0
+
+dbgsnap:
+	PUSH	PSW
+	PUSH	ACC
+       	MOV   	A,R0
+       	PUSH  	ACC
+       	MOV   	R0,#MODE
+       	MOV   	A,@R0
+       	CLR   	ACC.5		; to upper case
+       	CJNE	A,#'G',dbgs0
+       	SJMP	dbgs1
+dbgs0: 	;SJMP	dbg0
+	setb	RETIFLG		; force RETI
+	CJNE  	A,#'C',dbg1
+	MOV	A,@R0
+	MOV	C,ACC.5
+	MOV	A,#'N'		; break
+	MOV	ACC.5,C
+	MOV	@R0,A		
+	SJMP	dbg0
+dbgs1:	MOV	@R0,#'g'	; go
+	SJMP	dbg1
+
+dbgbrk:
+	PUSH	PSW
+	PUSH	ACC
+       	MOV   	A,R0
+       	PUSH  	ACC
+       	MOV   	R0,#MODE
+       	MOV   	A,@R0
+       	MOV   	@R0,#'N'	; break
+       	CLR   	ACC.5		; to upper case
+       	CJNE  	A,#'C',dbg1
+dbg0:  	MOV   	R0,#SAVERET
+       	MOV   	A,@R0
+       	PUSH  	ACC
+       	INC   	R0
+       	MOV   	A,@R0
+       	PUSH  	ACC
+       	MOV   	R0,#SAVESP
+       	MOV   	A,@R0
+       	DEC   	A
+       	MOV   	R0,A
+       	POP   	ACC
+       	MOV   	@R0,A
+       	INC   	R0
+       	POP   	ACC
+       	MOV   	@R0,A
+dbg1: 	POP   	ACC
+       	MOV   	R0,A
+       	POP	ACC
+       	POP	PSW
+	setb	RETIFLG		; force RETI
+	SJMP	INT
+	
+XINT0:
+	setb	RETIFLG
+	setb	INT0+DBGINT
+INT:
+	clr	EA
+	clr	EX0+DBGINT+DBGINT
+	clr	ES
+	clr	INTBIT
+	clr	SINTDBG
+	push	DPL
+	push	DPH
+	push	ACC
+
+	; save R0-R7
+	mov	a,R0		;SAVE R0
+	mov	R0,#SAVEREG
+	mov	@R0,a
+	inc	R0
+	mov	a,R1
+	mov	@R0,a
+	inc	R0
+	mov	a,R2
+	mov	@R0,a
+	inc	R0
+	mov	a,R3
+	mov	@R0,a
+	inc	R0
+	mov	a,R4
+	mov	@R0,a
+	inc	R0
+	mov	a,R5
+	mov	@R0,a
+	inc	R0
+	mov	a,R6
+	mov	@R0,a
+	inc	R0
+	mov	a,R7
+	mov	@R0,a
+
+	; save SFRs
+	mov	R0,#SAVESFR+2
+	mov	@R0,psw		;Save PSW
+	inc	R0
+	inc	R0		;BYPASS SP
+	pop	ACC		;GET a
+	mov	@R0,a
+	inc	R0
+	mov	@R0,B		;SAVE B
+	inc	R0
+	pop	ACC		;SAVE DPH
+	mov	@R0,a
+	inc	R0
+	pop	ACC		;SAVE DPL
+	mov	@R0,a
+	inc	R0
+
+	mov	@R0,#SAVESFR
+	pop	ACC		;SAVE PCH
+	mov	@R0,a
+	inc	R0
+	pop	ACC		;SAVE PCL
+	mov	@R0,a
+	inc	R0
+	inc	R0		;BYPASS PSW
+	mov	@R0,sp		;SAVE SP
+
+	mov	R0,#MODE
+	mov	a,@R0
+	anl	a,#5FH
+	cjne	a,#43H,XINT0NOC	;'C'
+	mov	R0,#SAVESP 	;if Call step,
+	mov	@R0,sp		;    save stack pointer
+	mov	R0,#SAVERET
+	pop	ACC		;    pop and save return address
+	mov	@R0,a
+	inc	R0
+	pop	ACC
+	mov	@R0,a
+	mov	dptr,#RETURN	;    push alternate ret address
+	mov	a,DPL
+	push	ACC
+	mov	a,DPH
+	push	ACC
+	ljmp	RESUME		;    resume execution of routine without interruption
+
+XINT0NOC:
+	ljmp	COMMAND
+
+RETURN:
+	push	ACC
+	mov	a,R0
+	mov	R0,#SAVEREG
+	mov	@R0,a
+	pop	ACC
+
+	mov	R0,#SAVESFR+4
+	mov	@R0,a			;save ACC
+;	inc	R0
+;	inc	R0			;skip B
+;	mov	@R0,dph			;save DPH
+;	inc	R0
+;	mov	@R0,dpl			;save DPL
+
+	mov	R0,#SAVERET
+	mov	a,@R0
+	inc	R0
+	push	ACC
+	mov	a,@R0
+	mov	r0,sp
+	xch	a,@r0
+	push	ACC
+;	mov	a,@R0
+;	pop	DPH
+;	push	ACC
+;	push	DPH
+
+	mov	R0,#MODE
+	mov	a,@R0
+	push	PSW
+	mov	C,ACC.5
+	mov	a,#4EH
+	mov	ACC.5,C
+	pop	PSW
+	mov	@R0,a
+
+	mov	R0,#SAVESFR+4		;ACC/B/DPH/DPL
+	mov	a,@R0			;get A
+;	inc	R0
+;	inc	R0			;skip B
+;	mov	dph,@R0			;get DPH
+;	inc	R0
+;	mov	dpl,@R0			;get DPL
+
+	push	ACC
+	mov	R0,#SAVEREG
+	mov	a,@R0
+	mov	R0,a
+	pop	ACC
+
+;	push	PSW
+	setb	RETIFLG
+	ljmp	INT
+
+RHEXW:
+	mov	a,R1
+	push	ACC
+	clr	a
+	mov	R0,a
+	mov	R2,a
+	mov	R3,a
+RHEXW0:
+	lcall	WAITKI
+	lcall	DDISA
+	cjne	a,#58H,RHEXW1		;exit if 'X'
+	ljmp	COMMAND
+RHEXW1:
+	cjne	a,#7FH,RHEXW2		;backspace
+	mov	a,R0
+	jz	RHEXW0
+	mov	a,#8
+	lcall	DDISA
+	dec	R0
+	mov	a,PSW
+	anl	a,#18h
+	orl	a,#2
+	mov	R1,a
+	clr	a
+	xch	a,@R1
+	swap	a
+	xchd	a,@R1
+	inc	R1
+	xch	a,@R1
+	swap	a
+	xchd	a,@R1
+	sjmp	RHEXW0
+RHEXW2:
+	cjne	a,#0DH,RHEXW4		;<CR>
+RHEXWX:	pop	ACC
+	mov	R1,a
+	ret
+RHEXW4:
+	cjne	a,#2CH,RHEXW5		;','
+	sjmp	RHEXWX
+RHEXW5:
+	cjne	a,#20H,RHEXW6		;' '
+	sjmp	RHEXWX
+RHEXW6:
+	cjne	a,#48H,RHEXW8		;'H'
+	sjmp	RHEXW0
+RHEXW8:
+	clr	C
+	subb	a,#3AH
+	jc	RHEXW7
+	clr	C
+	subb	a,#7
+RHEXW7:
+	add	a,#0AH
+	swap	a
+
+	xch	a,R1
+	mov	a,PSW
+	anl	a,#18h
+	orl	a,#3
+	xch	a,R1
+
+	xchd	a,@R1
+	swap	a
+	xch	a,@R1
+	dec	R1
+	xchd	a,@R1
+	swap	a
+	xch	a,@R1
+	inc	R0
+	sjmp	RHEXW0
+
+;-----	Wait char from kbrd
+WAITCHR:
+	mov	B,a
+WAITCHR0:
+	lcall	WAITKI
+	lcall	DDISA
+	cjne	a,#03H,WAITCHR1
+	ljmp	COMMAND
+WAITCHR1:
+	cjne	a,B,WAITCHR0
+	ret
+
+;-----	Disp space
+DSPC:
+	mov	a,#20H
+	ljmp	DDISA
+
+;-----	command: /reg=value
+COMSLASH:
+	lcall	WAITKI
+	lcall	DDISA
+	cjne	a,#41H,SFRNOTA
+	mov	R1,#SAVESFR+4
+UPDATEB:
+	mov	a,#3DH
+	lcall	WAITCHR
+	lcall	RHEXW
+	mov	a,R3
+	mov	@R1,a
+	ljmp	COMMAND
+SFRNOTA:
+	cjne	a,#42H,SFRNOTB
+	mov	R1,#SAVESFR+5
+	sjmp	UPDATEB
+SFRNOTB:
+	cjne	a,#44H,SFRNOTD
+	mov	R1,#SAVESFR+6
+UPDATEW:
+	mov	a,#3DH
+	lcall	WAITCHR
+	lcall	RHEXW
+	mov	a,R2
+	mov	@R1,a
+	inc	R1
+	mov	a,R3
+	mov	@R1,a
+	inc	R1
+	ljmp	COMMAND
+SFRNOTD:
+	cjne	a,#50H,SFRNOTP
+	lcall	WAITKI
+	lcall	DDISA
+	cjne	a,#31H,SFRNOTP1
+	mov	a,#3DH
+	lcall	WAITCHR
+	lcall	RHEXW
+	mov	a,R3
+	mov	P1,a
+	ljmp	COMMAND
+SFRNOTP1:
+	cjne	a,#43H,SFRNOTPC
+	mov	R1,#SAVESFR
+	sjmp	UPDATEW
+SFRNOTPC:
+	cjne	a,#53H,SFRNOTPS
+	mov	R1,#SAVESFR+2
+	sjmp	UPDATEW
+SFRNOTPS:
+	sjmp	SFRNOTX
+SFRNOTP:
+	cjne	a,#52H,SFRNOTR
+	lcall	WAITKI
+	lcall	DDISA
+	clr	C
+	subb	a,#30H
+	jc	SFRNOTX
+	subb	a,#8
+	jnc	SFRNOTX
+	add	a,#8
+	mov	R1,#SAVEREG
+	add	a,R1
+	mov	R1,a
+	mov	a,#3DH
+	lcall	WAITCHR
+	lcall	RHEXW
+	mov	a,R3
+	mov	@R1,a
+	ljmp	COMMAND
+SFRNOTR:
+SFRNOTX:
+	ljmp	COMMAND2
+
+;-----	Command: r=display R0-R7
+COMR:
+	lcall	DDISNL
+	mov	B,#8
+	mov	R1,#30H
+COMR1:
+	mov	a,#52H
+	lcall	DDISA
+	mov	a,R1
+	lcall	DDISA
+	mov	a,#20H
+	lcall	DDISA
+	inc	R1
+	djnz	B,COMR1
+	lcall	DDISNL
+	mov	B,#8
+	mov	R1,#SAVEREG
+COMR2:
+	mov	a,@R1
+	inc	R1
+	lcall	DHEXB
+	mov	a,#20H
+	lcall	DDISA
+	djnz	B,COMR2
+	ljmp	COMMAND
+
+;-----	Command: load hex file
+COMH:	mov	dptr,#MREADY
+	call	DTEXT
+	call	recvhex
+	jnz	COMHX
+	mov	a,dph
+	orl	a,dpl
+	jz	COMHX			;jump if no entry point
+	mov	r0,#SAVESFR
+	mov	@r0,dph
+	inc	r0
+	mov	@r0,dpl
+COMHX:	ljmp	COMMAND2
+
+;-----	Command: Disassemble (source)
+COMS:	push	18h
+	push	19h
+	push	1Ah
+	push	1Bh
+	call	RHEXW
+	call	DDISNL
+	mov	a,r0
+	jz	COMS1			;no value => disp page of instr
+	mov	18h,r2
+	mov	19h,r3
+	call	RHEXW
+	mov	1Ah,r2
+	mov	1Bh,r3
+	call	DASM1
+	sjmp	COMSX
+COMS1:
+	mov	R0,#SAVESFR
+	mov	a,@R0
+	inc	R0
+	mov	18H,a
+	mov	1AH,a
+	mov	a,@R0		
+	mov	19H,a
+	mov	1BH,a
+	mov	b,#22
+COMS2:
+	push	b
+	lcall	DASM1
+	pop	b
+	djnz	b,COMS2
+COMSX:
+	pop	1Bh
+	pop	1Ah
+	pop	19h
+	pop	18h
+	ljmp	COMMAND3
+
+;-----	Command: Display Data memory
+COMD:	mov	r1,#0
+	clr	36h
+COMD0:	mov	a,r1
+	anl	a,#0Fh
+	jnz	COMD1
+	call	DDISNL
+	mov	a,r1
+	call	DHEXB
+	call	DDISSP
+	call	DDISSP
+COMD1:	mov	a,@r1
+	inc	r1
+	call	DHEXB
+	mov	a,@r1
+	inc	r1
+	call	DHEXB
+	call	DDISSP
+	mov	a,r1
+	anl	a,#0Fh
+	jnz	COMD1
+	mov	a,#0F0h
+	add	a,r1
+	mov	r1,a
+COMD2:	mov	a,@r1
+	inc	r1
+	add	a,#0E0h
+	jnc	COMD3
+	add	a,#0A0h
+	jc	COMD3
+	add	a,#80h
+	sjmp	COMD4
+COMD3:	mov	a,#'.'
+COMD4:	call	DDISA
+	mov	a,r1
+	anl	a,#0Fh
+	jnz	COMD2
+	mov	a,r1
+	jnz	COMD0
+	ljmp	COMMAND2
+
+;-----	Command: Verify RAM
+COMV:
+	lcall	DDISNL
+	mov	r3,#0
+	mov	dptr,#0
+COMV0:	mov	r4,#1
+	movx	a,@dptr
+	mov	r1,a
+	cpl	a
+	mov	r2,a
+	movx	@dptr,a
+	movx	a,@dptr
+	mov	b,r1
+	cjne	a,b,COMV1
+	sjmp	COMVX		;no RAM
+COMV1:	inc	r4
+	mov	b,r2
+	cjne	a,b,COMVX	;bad RAM
+	inc	r4
+	clr	a
+	movc	a,@a+dptr
+	cjne	a,b,COMVX	;RAM Data
+	mov	a,r1
+	movx	@dptr,a
+	clr	a
+	movc	a,@a+dptr
+	mov	b,r1
+	cjne	a,b,COMVX
+	inc	r4
+COMVX:	mov	a,r1
+	movx	@dptr,a
+	mov	a,r4
+	mov	b,r3
+	cjne	a,b,COMVZ
+COMVY:	inc	dptr
+	mov	a,dph
+	orl	a,dpl
+	jnz	COMV0
+	ljmp	COMMAND3
+COMVZ:	mov	r3,a
+	clr	36h
+	lcall	DHEXDP
+	lcall	DDISSP
+	push	dph
+	push	dpl
+	mov	a,r3
+	mov	dptr,#MNORAM
+	dec	a
+	jz	COMVD
+	mov	dptr,#MBADRAM
+	dec	a
+	jz	COMVD
+	mov	dptr,#MRAMDATA
+	dec	a
+	jz	COMVD
+	mov	dptr,#MRAMCODA
+COMVD:	lcall	DTEXT
+	pop	dpl
+	pop	dph
+	lcall	DDISNL
+	sjmp	COMVY
+	
+MNORAM:
+	db	'No RAM"'
+MBADRAM:
+	db	'Bad RAM"'
+MRAMDATA:
+	db	'XDATA"'
+MRAMCODA:
+	db	'XDATA+CODE"'
+
+;-----	Char constants
+ESC	equ	1BH
+LEFTBRA	equ	5BH
+SEMICOL	equ	3BH
+POINT	equ	2EH
+MINUS	equ	2DH
+BREAK	equ	01H
+ENTER	equ	0DH
+
+;-----	Disp <ESC>[
+ESCANSI:
+	mov	a,#ESC
+	lcall	DDISA
+	mov	a,#LEFTBRA
+	lcall	DDISA
+	ret
+
+;-----	Disp hex or dcb byte
+OUTHEX:
+OUTBCD:
+	push	ACC
+	swap	a
+	lcall	OUTBCD2
+	pop	ACC
+OUTBCD2:
+	anl	a,#0FH
+	cjne	a,#0AH,OUTBCD3
+OUTBCD3:
+	jc	OUTBCD4
+	add	a,#07H
+OUTBCD4:
+	add	a,#30H
+	lcall	DDISA
+	ret
+
+;-----	ANSI gotoxy() = Send <ESC>[x;yH
+GOTOXY:
+	lcall	ESCANSI
+	mov	a,R2
+	lcall	OUTBCD
+	mov	a,#SEMICOL	;';'
+	lcall	DDISA
+	mov	a,R0
+	lcall	OUTBCD
+	mov	a,#48H		;'H'
+	lcall	DDISA
+	ret
+
+;-----	ANSI textattr() = Send <ESC>[xm
+TEXTATTR:
+	lcall	ESCANSI
+	mov	a,R0
+	lcall	OUTBCD
+	mov	a,#6DH		;'m'
+	lcall	DDISA
+	ret
+
+;-----	ANSI clrscr() = home cursor, reset text attr, Send <ESC>[0J
+CLRSCR:
+	mov	R2,#1
+	mov	R0,#1
+	lcall	GOTOXY
+	mov	R0,#0
+	lcall	TEXTATTR
+	mov	R0,#1
+	lcall	TEXTATTR
+	lcall	ESCANSI
+	mov	a,#30H		;'0'
+	lcall	DDISA
+	mov	a,#4AH		;'J'
+	lcall	DDISA
+	ret
+
+
+;-----	Command: Z=ZAP
+ZAP:
+	mov	r3,#'X'
+	lcall	CLRSCR
+	mov	DPH,#0
+ZAP0:
+	mov	DPL,#0
+	lcall	VIEWPAGE
+	push	DPL
+	push	DPH
+	mov	dptr,#MVMODE
+	call	DTEXT
+	pop	DPH
+	pop	DPL
+	mov	a,R3
+	call	DDISA
+	mov	R2,#16H
+	mov	R0,#1
+	lcall	GOTOXY
+ZAP1:
+	lcall	WAITKI
+	cjne	a,#'X',CNOTX		;'X'
+ZMODE:	mov	r3,a
+	sjmp	ZAP0
+
+CNOTX:
+	cjne	a,#'D',CNOTD
+	sjmp	ZMODE
+
+CNOTD:
+	cjne	a,#'C',CNOTC
+	sjmp	ZMODE
+
+CNOTC:
+	cjne	a,#ESC,CNOTESC
+	lcall	WAITKI
+	cjne	a,#ESC,CNOTESC2
+	ljmp	INIT
+
+CNOTESC2:
+	cjne	a,#5BH,ZAP0
+	lcall	WAITKI
+	cjne	a,#43H,CNOTESC3
+	sjmp	CNEXT1
+
+CNOTESC3:
+	cjne	a,#44H,CNOTESC4
+	sjmp	CPREV1
+
+CNOTESC4:
+	cjne	a,#42H,CNOTESC5
+	sjmp	CNEXT16
+
+CNOTESC5:
+	cjne	a,#41H,ZAP0
+	sjmp	CPREV16
+
+CNOTESC:
+	cjne	a,#1,CNOTBREAK
+	ljmp	INIT
+
+CNOTBREAK:
+	jnz	CNOTUS
+	lcall	WAITKI
+	cjne	a,#51H,CNOTSEMICOL	;';'
+CNEXT1:
+	inc	DPH
+	sjmp	ZAP0
+
+CNOTSEMICOL:
+	cjne	a,#49H,CNOTMINUS	;'-'
+CPREV1:
+	dec	DPH
+	sjmp	ZAP0
+
+CNOTMINUS:
+	cjne	a,#76H,CNOTPOINT	;'.'
+CNEXT16:
+	mov	a,DPH
+	add	a,#10H
+	mov	DPH,a
+	sjmp	ZAP0
+
+CNOTPOINT:
+	cjne	a,#04H,ZAP0
+CPREV16:
+	mov	a,DPH
+	add	a,#0F0H
+	mov	DPH,a
+	jmp	ZAP0
+
+CNOTUS:
+	cjne	a,#4DH,CNOTM		;'H'
+	sjmp	ZAPHEX
+
+CNOTM:
+	cjne	a,#4EH,CNOTA		;'a'
+	ljmp	ZAPASC
+
+CNOTA:
+	jmp	ZAP0
+
+;-----	ZAP: view 256-byte page
+VIEWPAGE:
+	clr	a
+	mov	R2,a
+	mov	R0,a
+	lcall	GOTOXY
+VLOOPL:
+	mov	a,#20H
+	lcall	DDISA
+	lcall	DDISA
+	cjne	r3,#'D',VLNOTD
+	lcall	DDISA
+	lcall	DDISA
+	sjmp	VLOOP1
+VLNOTD:
+	mov	a,DPH
+	lcall	OUTHEX
+VLOOP1:
+	mov	a,DPL
+	lcall	OUTHEX
+	mov	a,#20H
+	lcall	DDISA
+	lcall	DDISA
+	mov	B,#08H
+VLOOPH:
+	call	ZREAD
+	lcall	OUTHEX
+	inc	DPL
+	call	ZREAD
+	lcall	OUTHEX
+	inc	DPL
+	mov	a,#20H
+	lcall	DDISA
+	djnz	B,VLOOPH
+	mov	a,DPL
+	add	a,#0F0H
+	mov	DPL,a
+	mov	B,#10H
+VLOOPA:
+	call	ZREAD
+	inc	DPL
+	cjne	a,#20H,VLOOPA0
+VLOOPA0:
+	jnc	VLOOPA2
+VLOOPA1:
+	mov	a,#POINT
+	sjmp	VLOOPA4
+
+VLOOPA2:
+	cjne	a,#80H,VLOOPA3
+VLOOPA3:
+	jnc	VLOOPA1
+VLOOPA4:
+	lcall	DDISA
+	djnz	B,VLOOPA
+	mov	a,DPL
+	jz	VIEWHEXEND
+	lcall	DDISNL
+	sjmp	VLOOPL
+
+VIEWHEXEND:
+	ret
+
+;-----	ZAP Hex editor
+ZAPHEX:
+	push	DPL
+	push	DPH
+	mov	dptr,#MEMODE
+	call	DTEXT
+	pop	DPH
+	pop	DPL
+	mov	a,R3
+	call	DDISA
+	mov	R5,#1
+	mov	R4,#9
+	mov	R7,#1
+	mov	R6,#49H
+ZAPHEXH:
+	mov	R0,#7
+	lcall	TEXTATTR
+	lcall	ZAPHEXHDIS
+	mov	R2,#16H
+	mov	R0,#1
+	lcall	GOTOXY
+	lcall	WAITKI
+	cjne	a,#ESC,ZHNOTESC0
+	lcall	WAITKI
+ZHNOTESC0:
+	push	ACC
+	mov	R0,#0
+	lcall	TEXTATTR
+	mov	R0,#1
+	lcall	TEXTATTR
+	lcall	ZAPHEXHDIS
+	pop	ACC
+	cjne	a,#ESC,ZHNOTESC1
+	ljmp	ZAP0
+ZHNOTESC1:
+	cjne	a,#5BH,ZHNOTESC
+	lcall	WAITKI
+	cjne	a,#44H,ZHNOTD
+	sjmp	ZHLEFT
+ZHNOTD:	cjne	a,#43H,ZHNOTC
+	sjmp	ZHRIGHT
+ZHNOTC:	cjne	a,#41H,ZHNOTA
+	ljmp	ZHUP
+ZHNOTA:	cjne	a,#42H,ZHNOTB
+	sjmp	ZHDOWN
+ZHNOTB:	
+ZHH1:	ljmp	ZAPHEXH
+ZHNOTESC:
+	cjne	a,#48H,ZHNOTUP		;UP
+ZHUP:
+	mov	a,DPL
+	add	a,#0F0H
+	mov	DPL,a
+	mov	a,R5
+	add	a,#99H
+	da	a
+	mov	R5,a
+	mov	R7,a
+	cjne	a,#0,ZAPHEXH
+	mov	a,#16H
+	mov	R5,a
+	mov	R7,a
+	sjmp	ZAPHEXH
+ZHNOTUP:
+	cjne	a,#50H,ZHNOTDOWN	;DOWN
+ZHDOWN:
+	mov	a,DPL
+	add	a,#10H
+	mov	DPL,a
+	mov	a,R5
+	add	a,#01H
+	da	a
+	mov	R5,a
+	mov	R7,a
+	cjne	a,#17H,ZAPHEXH
+	mov	a,#1
+	mov	R5,a
+	mov	R7,a
+ZAPHEXH1:
+	sjmp	ZAPHEXH
+ZHNOTDOWN:
+	cjne	a,#4DH,ZHNOTRIGHT	;RIGHT
+ZHRIGHT:
+	mov	a,R4
+	add	a,#1
+	da	a
+	mov	R4,a
+	ljmp	ZAPHEXL
+ZHNOTRIGHT:
+	cjne	a,#4BH,ZHNOTLEFT	;LEFT
+ZHLEFT:
+	dec	DPL
+	mov	a,R4
+	add	a,#99H
+	da	a
+	mov	B,DPL
+	jnb	B.0,ZHLEFT0
+	add	a,#99H
+	da	a
+ZHLEFT0:
+	mov	R4,a
+	mov	a,R6
+	add	a,#99H
+	da	a
+	mov	R6,a
+	cjne	a,#48H,ZAPHEXL
+	mov	a,#47H
+	mov	R4,a
+	mov	a,#64H
+	mov	R6,a
+	mov	a,DPL
+	add	a,#10H
+	mov	DPL,a
+	ljmp	ZLUP
+ZHNOTLEFT:
+	cjne	a,#BREAK,ZHNOTBREAK
+	ljmp	ZAP0
+ZHNOTBREAK:
+	cjne	a,#ENTER,ZHNOTENTER
+	ljmp	ZAP0
+ZHNOTENTER:
+	clr	C
+	subb	a,#30H
+	jc	ZAPHEXH1
+	subb	a,#0AH
+	jc	ZHHEX0
+	subb	a,#07H
+	jc	ZAPHEXH1
+ZHHEX0:
+	clr	C
+	subb	a,#06H
+	jnb	ACC.7,ZAPHEXH1
+	add	a,#10H
+	swap	a
+	mov	B,a
+	call	ZREAD
+	anl	a,#0FH
+	orl	a,B
+	call	ZWRITE
+	lcall	ZAPHEXHDIS
+	ljmp	ZHRIGHT
+
+ZAPHEXL:
+	mov	R0,#7
+	lcall	TEXTATTR
+	lcall	ZAPHEXLDIS
+	mov	R2,#16H
+	mov	R0,#1
+	lcall	GOTOXY
+	lcall	WAITKI
+	cjne	a,#ESC,ZLNOTESC0
+	lcall	WAITKI
+ZLNOTESC0:
+	push	ACC
+	mov	R0,#0
+	lcall	TEXTATTR
+	mov	R0,#1
+	lcall	TEXTATTR
+	lcall	ZAPHEXLDIS
+	pop	ACC
+	cjne	a,#ESC,ZLNOTESC1
+	ljmp	ZAP0
+ZLNOTESC1:
+	cjne	a,#5BH,ZLNOTESC
+	lcall	WAITKI
+	cjne	a,#44H,ZLNOTD
+	sjmp	ZLLEFT
+ZLNOTD:	cjne	a,#43H,ZLNOTC
+	sjmp	ZLRIGHT
+ZLNOTC:	cjne	a,#41H,ZLNOTA
+	ljmp	ZLUP
+ZLNOTA:	cjne	a,#42H,ZLNOTB
+	sjmp	ZLDOWN
+ZLNOTB:	
+ZLH1:	ljmp	ZAPHEXL
+	ljmp	ZAP0
+ZLNOTESC:
+	cjne	a,#48H,ZLNOTUP
+ZLUP:
+	mov	a,DPL
+	add	a,#0F0H
+	mov	DPL,a
+	mov	a,R5
+	add	a,#99H
+	da	a
+	mov	R5,a
+	mov	R7,a
+	cjne	a,#0,ZAPHEXL
+	mov	a,#16H
+	mov	R7,a
+	mov	R5,a
+	sjmp	ZAPHEXL
+ZLNOTUP:
+	cjne	a,#50H,ZLNOTDOWN
+ZLDOWN:
+	mov	a,DPL
+	add	a,#10H
+	mov	DPL,a
+	mov	a,R5
+	add	a,#1
+	da	a
+	mov	R5,a
+	mov	R7,a
+	cjne	a,#17H,ZAPHEXL
+	mov	a,#1
+	mov	R7,a
+	mov	R5,a
+ZAPHEXL1:
+	sjmp	ZAPHEXL
+ZLNOTDOWN:
+	cjne	a,#4DH,ZLNOTRIGHT
+ZLRIGHT:
+	inc	DPL
+	mov	a,R4
+	add	a,#1
+	mov	B,DPL
+	jb	B.0,ZLRIGHT0
+	add	a,#1
+ZLRIGHT0:
+	da	a
+	mov	R4,a
+	mov	a,R6
+	add	a,#1
+	da	a
+	mov	R6,a
+	cjne	a,#65H,ZAPHEXH0
+	mov	a,DPL
+	add	a,#0F0H
+	mov	DPL,a
+	mov	a,#49H
+	mov	R6,a
+	mov	a,#09H
+	mov	R4,a
+	ljmp	ZHDOWN
+ZLNOTRIGHT:
+	cjne	a,#4BH,ZLNOTLEFT
+ZLLEFT:
+	mov	a,R4
+	add	a,#99H
+	da	a
+	mov	R4,a
+ZAPHEXH0:
+	ljmp	ZAPHEXH
+ZLNOTLEFT:
+	cjne	a,#BREAK,ZLNOTBREAK
+	ljmp	ZAP0
+ZLNOTBREAK:
+	cjne	a,#ENTER,ZLNOTENTER
+	ljmp	ZAP0
+ZLNOTENTER:
+	clr	C
+	subb	a,#30H
+	jc	ZAPHEXL1
+	subb	a,#0AH
+	jc	ZLHEX0
+	subb	a,#07H
+	jc	ZAPHEXL1
+ZLHEX0:
+	clr	C
+	subb	a,#06H
+	jb	ACC.7,ZLHEX1
+	ljmp	ZAPHEXL1
+ZLHEX1:	add	a,#10H
+	mov	B,a
+	call	ZREAD
+	anl	a,#0F0H
+	orl	a,B
+	call	ZWRITE
+	lcall	ZAPHEXLDIS
+	ljmp	ZLRIGHT
+
+;-----	ZAP ASCII editor: not implemented
+ZAPASC:
+	ljmp	ZAP0
+	
+ZAPHEXHDIS:
+	mov	2,5
+	mov	0,4
+	lcall	GOTOXY
+	call	ZREAD
+	swap	a
+ZHD0:
+	lcall	OUTBCD2
+	mov	2,7
+	mov	0,6
+	lcall	GOTOXY
+	call	ZREAD
+	cjne	a,#20H,ZHD1
+ZHD1:
+	jnc	ZHD3
+ZHD2:
+	mov	a,#POINT
+	sjmp	ZHD5
+ZHD3:
+	cjne	a,#80H,ZHD4
+ZHD4:
+	jnc	ZHD2
+ZHD5:
+	lcall	DDISA
+	ret
+
+ZAPHEXLDIS:
+	mov	2,5
+	mov	0,4
+	lcall	GOTOXY
+	call	ZREAD
+	sjmp	ZHD0
+
+ZREAD:	cjne	R3,#'C',ZRNOTX
+	clr	a
+	movc	a,@a+dptr
+	ret
+ZRNOTX:	cjne	R3,#'D',ZRNOTD
+	mov	r0,dpl
+	mov	a,@r0
+	ret
+ZRNOTD:	movx	a,@dptr
+	ret
+
+ZWRITE:	cjne	R3,#'C',ZWNOTX
+	ret
+ZWNOTX:	cjne	R3,#'D',ZWNOTD
+	mov	r0,dpl
+	mov	@r0,a
+	ret
+ZWNOTD:	movx	@dptr,a
+	ret
+
+MVMODE:	db	0Dh,0Ah,'View: "',0
+
+MEMODE:	db	0Dh,0Ah,'Edit: "',0
+
+;=====	DEBUG HELP
+DBGHLP:	mov	dptr,#HLPDBG
+	lcall	DTEXT
+	ljmp	COMMAND2
+
+HLPDBG:	db	0DH,0AH
+	db	'== GMon51 Help =='
+	db	0DH,0AH
+	db	'  I		Instruction Step'
+	db	0DH,0AH
+	db	'  C		Call Step'
+	db	0DH,0AH
+	db	'  G		Go'
+	db	0DH,0AH
+	db	'  D		Display Data Memory'
+	db	0DH,0AH
+	db	'  R		Display R0-R7'
+	db	0DH,0AH
+	db	'  X		Display SFRs'
+	db	0DH,0AH
+	db	'  TI		Instruction Trace'
+	db	0DH,0AH
+	db	'  TC		Call Trace'
+	db	0DH,0AH
+	db	'  Sbeg,end	Disassemble'
+	db	0DH,0AH
+	db	'  /sfr=n	Alter SFR value'
+	db	0DH,0AH
+	db	'  H		Load Hex File'
+	db	0DH,0AH
+	db	'  V		Verify Memory'
+	db	0DH,0AH
+	db	'  Z		Zap Memory'
+	db	22H
+
+MREADY:	db	0Dh,0Ah,'Ready',0Dh,0Ah,22h,0
+
+
+;----- Input hexadecimal digits from RI
+;       return  a == binary value
+;               C == ctrl-c pressed
+
+        public  inhexacc
+inhexacc:
+        mov     r1,#2
+        clr     a
+inhexacc0:
+        anl     a,#0Fh
+        mov     r0,a
+        call    WAITKI
+        cjne    a,#03h,inhexacc00
+        setb    c
+        sjmp    inhexacc_end
+inhexacc00:
+        call    DDISA
+        clr     c
+        subb    a,#'0'
+        jc      inhexacc2
+        subb    a,#10
+        jc      inhexacc1
+        subb    a,#7
+        jc      inhexacc2
+        subb    a,#6
+        jnc     inhexacc2
+        add     a,#6
+inhexacc1:
+        add     a,#10
+        swap    a
+        orl     a,r0
+        swap    a
+        mov     r0,a
+        djnz    r1,inhexacc0
+inhexacc2:
+        clr     c
+inhexacc_end:
+        mov     a,r0
+        ret
+
+
+
+;----- Receive Hex-Intel file
+recvhex:
+        call    WAITKI                  ;wait ':'
+        cjne    a,#03h,recvhex0
+        setb    c
+        sjmp    recvhex_end
+recvhex0:
+        cjne    a,#':',recvhex
+        call    DDISA
+        call    inhexacc                ;get block length
+        jc      recvhex_end
+        mov     b,a
+        mov     r7,a
+        call    inhexacc                ;get address high byte
+        jc      recvhex_end
+        mov     dph,a
+        add     a,r7
+        mov     r7,a
+        call    inhexacc                ;get address low byte
+        jc      recvhex_end
+        mov     dpl,a
+        add     a,r7
+        mov     r7,a
+        call    inhexacc                ;get block type
+        jc      recvhex_end
+        mov     r6,a
+        add     a,r7
+        mov     r7,a
+        mov     a,b
+        jz      recvhex3
+recvhex2:
+        call    inhexacc                ;get data byte
+        movx    @dptr,a
+        inc     dptr
+        add     a,r7
+        mov     r7,a
+        djnz    b,recvhex2
+recvhex3:
+        call    inhexacc                ;get checksum
+        add     a,r7
+        jnz     recvhex5
+recvhex4:
+        call    WAITKI                   ;wait CR
+        call    DDISA
+        cjne    a,#0Dh,recvhex4
+        mov     a,#0Ah
+        call    DDISA
+        mov     a,r6
+        cjne    a,#01h,recvhex
+        clr     c
+        sjmp    recvhex_end
+recvhex5:
+        mov	dptr,#MCKERR
+	call	DTEXT
+
+        setb    c
+recvhex_end:
+        clr     a
+        rlc     a
+        ret
+
+MCKERR: db      0Dh,0Ah,'Checksum error',0Dh,0Ah,22h,0
+
+;=====	DISASSEMBLER  =====
+
+FETCH:	mov	DPH,18H
+	mov	DPL,19H
+	clr	a
+	movc	a,@A+dptr
+	inc	dptr
+	mov	18H,DPH
+	mov	19H,DPL
+	ret
+
+;-----	DASM Main loop
+DASMLP:
+	clr	C
+	mov	a,1BH
+	subb	a,19H
+	mov	a,1AH
+	subb	a,18H
+	jnc	DASM0
+	ret
+DASM0:
+	lcall	DHITKI		;pause or abort?
+DASM1:
+	mov	DPH,18H
+	mov	DPL,19H
+	mov	R0,#0
+	clr	36H
+	lcall	DHEXDP		;disp ptr
+	mov	a,#6
+	lcall	DTABS		;tab 6
+	lcall	FETCH
+	mov	R7,a		;R7=opcode
+	mov	dptr,#TOPCOD
+	clr	C
+	RLC	a
+	jnc	DASM2
+	inc	DPH
+DASM2:	mov	R6,a
+	movc	a,@A+dptr
+	xch	a,R6		;R6=mnemo
+	inc	a
+	movc	a,@A+dptr
+	mov	R5,a		;R5=operands
+;	sjmp	DASMSK		;skip hex display
+	mov	R0,#0
+	mov	a,R7
+        lcall	DHEXB		;disp opcode byte
+	push	18H
+	push	19H
+	mov	a,R5
+	swap	a
+	anl	a,#0FH
+	lcall	DHEXOP		;disp operand 1 byte
+	mov	a,R5
+	anl	a,#0FH		;2nd operand?
+	jz	DASM21
+	lcall	DHEXOP		;disp operand 2 byte
+	mov	a,R6
+	xrl	a,#NCJNE	;cjne?
+	jnz	DASM21
+	lcall	DHEXOP1		;if yes disp operand 3 byte
+DASM21:	pop	19H
+	pop	18H  		;restore ptr
+DASMSK:	mov	a,#10
+	lcall	DTABS 
+	setb	36H		;Disassembler mode for hex disp
+	mov	a,R6
+	mov	dptr,#TMNEMO
+	lcall	DKYWRD
+	mov	a,#6
+	lcall	DTABS
+	mov	a,#NMOVM	;MOVM ?
+	xrl	a,R6
+	jnz	DASM22
+	lcall	FETCH		;if yes swap operands
+	push	ACC
+	lcall	DOPDATAADDR
+	mov	a,#2CH
+	lcall	DDISA
+	pop	ACC
+	lcall	DADDR
+	sjmp	DASM3
+DASM22: mov	a,#NMUL		;MUL or DIV ?
+	xrl	a,R6
+	jz	DASM23
+	mov	a,#NDIV
+	xrl	a,R6
+	jnz	DASM24
+DASM23:	mov	dptr,#MAB	;if yes disp 'AB'
+	lcall	DTEXT
+	sjmp	DASM3	
+DASM24: mov	a,#NDB		;db 0A5H
+	xrl	a,R6
+	jnz	DASM25
+	mov	a,R7
+	lcall	DHEXA		;disp opcode
+	lcall	DDISH
+DASM25:	mov	a,R5
+	swap	a
+	anl	a,#0FH
+	lcall	DOPRND		;disp 1st operand
+	mov	a,R5
+	anl	a,#0FH		;2nd operand?
+	jz	DASM3
+	mov	R4,a
+	mov	a,#2CH
+	lcall	DDISA
+	mov	a,R4
+	lcall	DOPRND		;disp 2nd operand
+	mov	a,R6
+	xrl	a,#NCJNE	;cjne?
+	jnz	DASM3
+	mov	a,#2CH
+	lcall	DDISA
+	lcall	DOPSADDR	;if yes disp 3rd operand
+
+DASM3:	lcall	DDISNL
+	ljmp	DASMLP
+
+;-----	Display keyword @A from table @DPTR
+;	UC chars are keyword 1st chars
+;	chars < 20H count undefined keywords
+;	LC or digits are keyword next chars
+DKYWRD:	mov	B,a
+DKYWR0:	clr	a		;check this keyword
+	movc	a,@A+dptr
+	jnb	ACC.6,DKYWR5    ;jump if not UC letter (<20H)
+	mov	a,B		;
+	jnz	DKYWR3          ;jump if not good keyword
+	clr	a
+	movc	a,@A+dptr	;UC letter => display
+	lcall	DDISA
+	inc	R0		;count displayed chars
+	inc	dptr
+DKYWR1:	clr	a		;loop
+	movc	a,@A+dptr
+	inc	dptr
+	clr	C
+	jnb	ACC.5,DKYWRX	;Done if UC or <20H
+	jnb	ACC.6,DKYWR2	;jump if not LC (digits)
+	add	a,#0E0H		;LC->UC
+DKYWR2:	lcall	DDISA
+	inc	R0              ;count displayed chars
+	sjmp	DKYWR1
+
+DKYWR3:	inc	dptr		;seek next keyword
+	clr	a
+	movc	a,@A+dptr
+	jb	ACC.5,DKYWR3	;loop while not UC and not <20H
+	dec	B
+	sjmp	DKYWR0		;check keyword
+	
+DKYWR5:	inc	dptr		;skip a undefined keywords
+	xch	a,B
+	clr	C
+	subb	a,B
+	mov	B,a
+	jnc	DKYWR0		;check if not last keyword
+
+DKYWRX:	ret
+
+;-----	Display DATA address or SFR name
+DADDR:	mov	dptr,#TSFRS
+	mov	R4,a
+	lcall	DKYWRD
+	jnc	DKYWRX
+DADDR0:	mov	a,R4
+	lcall	DHEXA
+	ljmp	DDISH
+
+;-----	Display BIT address or BIT name
+;	1: as bit name if defined
+;	2: as SFR.n if SFR name defined
+;	3: as bit addr otherwise
+DBITAD:	mov	dptr,#TBITS	
+	mov	R4,a
+	lcall	DKYWRD		;find and disp BIT name
+	jnc	DKYWRX		;exit if BIT name found
+	mov	a,R4
+	anl	a,#0F8H
+	mov	dptr,#TSFRS	;find and disp SFR name
+	lcall	DKYWRD
+	jc	DADDR0		;disp bit addr if SFR name not found
+	mov	a,#2EH		;disp '.'
+	lcall	DDISA
+	mov	a,R4
+	anl	a,#7
+	orl	a,#30H
+	ljmp	DDISA		;disp bit number
+
+;-----	Display operand
+DHEXOP:	mov	dptr,#THOVEC
+	mov	B,#3
+	mul	AB
+	jmp	@A+dptr
+THOVEC:	ljmp	DHEXOP0		;0
+	ljmp	DHEXOP0		;1
+	ljmp	DHEXOP0		;2
+	ljmp	DHEXOP0		;3
+	ljmp	DHEXOP1		;4
+	ljmp	DHEXOP1		;5
+	ljmp	DHEXOP1		;6
+	ljmp	DHEXOP0		;7
+	ljmp	DHEXOP0		;8
+	ljmp	DHEXOP0		;9
+	ljmp	DHEXOP0		;A
+	ljmp	DHEXOP1		;B
+	ljmp	DHEXOP0		;C
+	ljmp	DHEXOP2		;D
+        ljmp	DHEXOP3		;E
+	ljmp	DHEXOP1		;F
+
+DHEXOP3:mov	a,#NACALL
+	xrl	a,R6
+	jz	DHEXOP1
+	mov	a,#NAJMP
+	xrl	a,R6
+	jz	DHEXOP1
+DHEXOP2:lcall	FETCH
+	lcall	DHEXB
+DHEXOP1:lcall	FETCH
+	lcall	DHEXB
+DHEXOP0:ret
+
+;-----	Display operand
+DOPRND:	mov	dptr,#TOPVEC
+	mov	B,#3
+	mul	AB
+	jmp	@A+dptr
+TOPVEC:	ljmp	DOPNONE		;0 no oprnd
+	ljmp	DOPA		;1 A
+	ljmp	DOPATRX		;2 @Rx
+	ljmp	DOPRX		;3 Rx
+	ljmp	DOPBITADDR	;4 bit
+	ljmp	DOPDATA		;5 #byte
+	ljmp	DOPDATAADDR	;6 data
+	ljmp	DOPC		;7 C
+	ljmp	DOPATADPTR	;8 @A+DPTR
+	ljmp	DOPATAPC	;9 @A+PC
+	ljmp	DOPDPTR		;A DPTR
+	ljmp	DOPNOTBITADDR	;B /bit
+	ljmp	DOPATDPTR	;C @DPTR
+	ljmp	DOPDATAW	;D #word
+        ljmp	DOPADDR		;E addr (Aop/Lop)
+	ljmp	DOPSADDR	;F addr (Sop)
+
+MATDP:	db	'@'
+MDPTR:	db	'DPTR"'
+MATRX:	db	'@R"'
+MATADP:	db	'@A+DPTR"'
+MATAPC:	db	'@A+PC"'
+MAB:	db	'AB"'
+
+;-----	No operand
+DOPNONE:
+	ret
+
+;-----	Operand A
+DOPA:
+	mov	a,#41H		;'A'
+	ljmp	DDISA
+
+;-----	Operand @Rx
+DOPATRX:
+	mov	dptr,#MATRX
+	lcall	DTEXT
+	mov	a,R7		;opcode
+	anl	a,#1
+	orl	a,#30H		;'0'
+	ljmp	DDISA
+
+;-----	Operand Rx
+DOPRX:
+	mov	a,#52H		;'R'
+	lcall	DDISA
+	mov	a,R7		;opcode
+	anl	a,#7
+	orl	a,#30H		;'0'
+	ljmp	DDISA
+
+;-----	Operand bit
+DOPBITADDR:
+	lcall	FETCH
+	ljmp	DBITAD
+
+;-----	Operand #byte
+DOPDATA:
+	mov	a,#23H		;'#'
+	lcall	DDISA
+	lcall	FETCH
+	lcall	DHEXA
+	ljmp	DDISH
+
+;-----	Operand data
+DOPDATAADDR:
+	lcall	FETCH
+	ljmp	DADDR
+	
+;-----	Operand C
+DOPC:	mov	a,#43H		;'C'
+	ljmp	DDISA
+
+;-----	Operand @A+DPTR
+DOPATADPTR:
+	mov	dptr,#MATADP
+	ljmp	DTEXT
+
+;-----	Operand @A+PC
+DOPATAPC:
+	mov	dptr,#MATAPC
+	ljmp	DTEXT
+	
+;-----	Operand dptr
+DOPDPTR:
+	mov	dptr,#MDPTR
+	ljmp	DTEXT
+
+;-----	Operand /bit
+DOPNOTBITADDR:
+	mov	a,#2FH		;'/'
+	lcall	DDISA
+	lcall	FETCH
+	ljmp	DBITAD
+	
+;-----	Operand @DPTR
+DOPATDPTR:
+	mov	dptr,#MATDP
+	ljmp	DTEXT
+
+;-----	Operand #word
+DOPDATAW:
+	mov	a,#23H		;'#'
+	lcall	DDISA
+DOPAD0:	lcall	FETCH
+	push	ACC
+	lcall	FETCH
+	mov	DPL,a
+	pop	DPH
+	lcall	DHEXDP
+	ljmp	DDISH
+
+;-----	Operand addr (A/L+CALL/JMP)
+DOPADDR:
+	mov	a,#NLCALL
+	xrl	a,R6
+	jz	DOPAD0
+	mov	a,#NLJMP
+	xrl	a,R6
+	jz	DOPAD0
+	lcall	FETCH
+	mov	DPL,a
+	anl	DPH,#0F8H
+	mov	a,R7
+	anl	a,#0E0H
+	rl	a
+	rl	a
+	rl	a
+	orl	DPH,a
+	lcall	DHEXDP
+	ljmp	DDISH
+	
+;-----	Operand addr (sjmp)
+DOPSADDR:
+	lcall	FETCH
+	jnb	ACC.7,DOPSA1	;dec dph if offset < 0
+	dec	DPH
+DOPSA1:	add	a,DPL
+	mov	DPL,a
+	clr	a
+	addc	a,DPH
+	mov	DPH,a
+	lcall	DHEXDP
+	ljmp	DDISH
+
+
+;=====	KEYWORDS TABLES  =====
+
+;-----	SFR names
+TSFRS:
+	db	1FH,1FH,1FH,1FH,4H
+	db	'P0SpDplDph'
+	db	3
+	db	'Pcon'
+	db	'TconTmodTl0Tl1Th0Th1'
+	db	2
+	db	'P1'
+	db	7
+	db	'SconSbuf'
+	db	6
+	db	'P2'
+	db	7
+	db	'Ie'
+	db	7
+	db	'P3'
+	db	7
+	db	'Ip'
+	db	15
+	db	'T2con'
+	db	1
+	db	'Rcap2lRcap2hTl2Th2'
+	db	2
+	db	'Psw'
+	db	15
+	db	'Acc'
+	db	15
+	db	'B'
+	db	15
+
+;-----	BIT names
+TBITS:
+	db	1FH,1FH,1FH,1FH,4H
+	db	8
+	db	'It0Ie0It1Ie1Tr0Tf0Tr1Tf1'
+	db	8
+	db	'RiTiRb8Tb8RenSm2Sm1Sm0'
+	db	8
+	db	'Ex0Et0Ex1Et1Es'
+	db		2
+	db		'Ea'
+	db	'RxdTxdInt0Int1T0T1WrRd'
+	db	'Px0Pt0Px1Pt1Ps'
+	db		3
+	db	16
+	db	'P'
+	db		1
+	db		'OvRs0Rs1F0AcCy'
+	db	16,16,8
+
+
+;-----	Mnemonics names
+TMNEMO:
+	db	'IncDecAddAddcOrlAnlXrlMovMovSubbCjneXchDjnz'
+NINC	equ	0
+NDEC	equ	1
+NADD	equ	2
+NADDC	equ	3
+NORL	equ	4
+NANL	equ	5
+NXRL	equ	6
+NMOV	equ	7
+NMOVM	equ	8
+NSUBB	equ	9
+NCJNE	equ	10
+NXCH	equ	11
+NDJNZ	equ	12
+	db	'NopAjmpAcallLjmpLcallJbcJbJnbJcJncJzJnzSjmp'
+NNOP	equ	13
+NAJMP	equ	14
+NACALL	equ	15
+NLJMP	equ	16
+NLCALL	equ	17
+NJBC	equ	18
+NJB	equ	19
+NJNB	equ	20
+NJC	equ	21
+NJNC	equ	22
+NJZ	equ	23
+NJNZ	equ	24
+NSJMP	equ	25
+	db	'RrRrcRlRlcMovcCplClrSetbMovxRetRetiDivMulDb'
+NRR	equ	26
+NRRC	equ	27
+NRL	equ	28
+NRLC	equ	29
+NMOVC	equ	30
+NCPL	equ	31
+NCLR	equ	32
+NSETB	equ	33
+NMOVX	equ	34
+NRET	equ	35
+NRETI	equ	36
+NDIV	equ	37
+NMUL	equ	38
+NDB	equ	39
+	db	'PushSwapPopDaXchdJmp'
+NPUSH	equ	40
+NSWAP	equ	41
+NPOP	equ	42
+NDA	equ	43
+NXCHD	equ	44
+NJMP	equ	45
+
+       
+;=====	OPCODES TABLE  =====
+;byte 	2*n	Mnemonic index
+;	2*n+1	(Operand 1 index) * 16 + (Operand 2 index)
+;where	n = opcode
+TOPCOD:	
+	db	NNOP,00H,NAJMP,0E0H,NLJMP,0E0H,NRR,10H
+	db	NINC,10H,NINC,60H,NINC,20H,NINC,20H
+	db	NINC,30H,NINC,30H,NINC,30H,NINC,30H
+	db	NINC,30H,NINC,30H,NINC,30H,NINC,30H
+	db	NJBC,4FH,NACALL,0E0H,NLCALL,0E0H,NRRC,10H
+	db	NDEC,10H,NDEC,60H,NDEC,20H,NDEC,20H
+	db	NDEC,30H,NDEC,30H,NDEC,30H,NDEC,30H
+	db	NDEC,30H,NDEC,30H,NDEC,30H,NDEC,30H
+	db	NJB,4FH,NAJMP,0E0H,NRET,00H,NRL,10H
+	db	NADD,15H,NADD,16H,NADD,12H,NADD,12H
+	db	NADD,13H,NADD,13H,NADD,13H,NADD,13H
+	db	NADD,13H,NADD,13H,NADD,13H,NADD,13H
+	db	NJNB,4FH,NACALL,0E0H,NRETI,00H,NRLC,10H
+	db	NADDC,15H,NADDC,16H,NADDC,12H,NADDC,12H
+	db	NADDC,13H,NADDC,13H,NADDC,13H,NADDC,13H
+	db	NADDC,13H,NADDC,13H,NADDC,13H,NADDC,13H
+	db	NJC,0F0H,NAJMP,0E0H,NORL,61H,NORL,65H
+	db	NORL,15H,NORL,16H,NORL,12H,NORL,12H
+	db	NORL,13H,NORL,13H,NORL,13H,NORL,13H
+	db	NORL,13H,NORL,13H,NORL,13H,NORL,13H
+	db	NJNC,0F0H,NACALL,0E0H,NANL,61H,NANL,65H
+	db	NANL,15H,NANL,16H,NANL,12H,NANL,12H
+	db	NANL,13H,NANL,13H,NANL,13H,NANL,13H
+	db	NANL,13H,NANL,13H,NANL,13H,NANL,13H
+	db	NJZ,0F0H,NAJMP,0E0H,NXRL,61H,NXRL,65H
+	db	NXRL,15H,NXRL,16H,NXRL,12H,NXRL,12H
+	db	NXRL,13H,NXRL,13H,NXRL,13H,NXRL,13H
+	db	NXRL,13H,NXRL,13H,NXRL,13H,NXRL,13H
+	db	NJNZ,0F0H,NACALL,0E0H,NORL,74H,NJMP,80H
+	db	NMOV,15H,NMOV,65H,NMOV,25H,NMOV,25H
+	db	NMOV,35H,NMOV,35H,NMOV,35H,NMOV,35H
+	db	NMOV,35H,NMOV,35H,NMOV,35H,NMOV,35H
+	db	NSJMP,0F0H,NAJMP,0E0H,NANL,74H,NMOVC,19H
+	db	NDIV,00H,NMOVM,66H,NMOV,62H,NMOV,62H
+	db	NMOV,63H,NMOV,63H,NMOV,63H,NMOV,63H
+	db	NMOV,63H,NMOV,63H,NMOV,63H,NMOV,63H
+	db	NMOV,0ADH,NACALL,0E0H,NMOV,47H,NMOVC,18H
+	db	NSUBB,15H,NSUBB,16H,NSUBB,12H,NSUBB,12H
+	db	NSUBB,13H,NSUBB,13H,NSUBB,13H,NSUBB,13H
+	db	NSUBB,13H,NSUBB,13H,NSUBB,13H,NSUBB,13H
+	db	NORL,7BH,NAJMP,0E0H,NMOV,74H,NINC,0A0H
+	db	NMUL,00H,NDB,00H,NMOV,26H,NMOV,26H
+	db	NMOV,36H,NMOV,36H,NMOV,36H,NMOV,36H
+	db	NMOV,36H,NMOV,36H,NMOV,36H,NMOV,36H
+	db	NANL,7BH,NACALL,0E0H,NCPL,40H,NCPL,70H
+	db	NCJNE,15H,NCJNE,16H,NCJNE,25H,NCJNE,25H
+	db	NCJNE,35H,NCJNE,35H,NCJNE,35H,NCJNE,35H
+	db	NCJNE,35H,NCJNE,35H,NCJNE,35H,NCJNE,35H
+	db	NPUSH,60H,NAJMP,0E0H,NCLR,40H,NCLR,70H
+	db	NSWAP,10H,NXCH,16H,NXCH,12H,NXCH,12H
+	db	NXCH,13H,NXCH,13H,NXCH,13H,NXCH,13H
+	db	NXCH,13H,NXCH,13H,NXCH,13H,NXCH,13H
+	db	NPOP,60H,NACALL,0E0H,NSETB,40H,NSETB,70H
+	db	NDA,10H,NDJNZ,6FH,NXCHD,12H,NXCHD,12H
+	db	NDJNZ,3FH,NDJNZ,3FH,NDJNZ,3FH,NDJNZ,3FH
+	db	NDJNZ,3FH,NDJNZ,3FH,NDJNZ,3FH,NDJNZ,3FH
+	db	NMOVX,1CH,NAJMP,0E0H,NMOVX,12H,NMOVX,12H
+	db	NCLR,10H,NMOV,16H,NMOV,12H,NMOV,12H
+	db	NMOV,13H,NMOV,13H,NMOV,13H,NMOV,13H
+	db	NMOV,13H,NMOV,13H,NMOV,13H,NMOV,13H
+	db	NMOVX,0C1H,NACALL,0E0H,NMOVX,21H,NMOVX,21H
+	db	NCPL,10H,NMOV,61H,NMOV,21H,NMOV,21H
+	db	NMOV,31H,NMOV,31H,NMOV,31H,NMOV,31H
+	db	NMOV,31H,NMOV,31H,NMOV,31H,NMOV,31H
+
+
+
+;=====	EMON TOOLS  =====
+
+
+CR        equ       0Dh
+LF        equ       0Ah
+ACK       EQU       06H
+NACK      EQU       15H
+;
+;
+; RAM Definitions
+;          
+	  STACK     datasim
+;offset for this segment must be 7F for simcad
+;user internal ram is then 30h -> 65h (53 bytes)   7F-(18D+16D)
+;if 3 bank register and bit segment not used 8 ->  (   bytes)
+;
+HEXLEN  DS   1  ;for hex load                                  
+HEXSUM  DS   2
+;
+op1     equ  $  ;arithmetic storage
+quot    equ  $
+acc_b   DS   5
+op2     equ  op1+2
+divi    equ  op2
+;
+prod    equ  $
+acc_a   ds   5
+;
+divcnt  ds   1
+;
+; used for snapshot and MON
+PSWSAV  DS   1
+ACCSAV  DS   1
+DPHSAV  DS   1
+DPLSAV  DS   1
+stk     ds   16
+
+	RSEG	code
+
+;____________________________________________________________________
+;____________________________________________________________________
+; utilitaires emon
+;____________________________________________________________________
+;____________________________________________________________________
+;
+;
+;______________________________________
+;user vectors linker
+;appel :link
+;fonction :transfert de l'adresse d'une procédure d'interruption
+;entrées  :(a)=index;  1=IE0, 2=TF0, 3=IE1, 4=TF1, 5=RI+TI,15=T2B0
+;6=SI, 7=CT0, 8=CT1, 9=CT2, 10=CT3, 11=ADCI, 12=CM0, 13=CM1, 14=CM2                                                                        
+;          (dptr)=vecteur
+;sortie   :néant
+;
+link   MOV   R7,DPL          ; target adr in DPTR , table offset in A
+       MOV   R6,DPH
+       MOV   DPTR,#rstvec
+       CLR   C
+       SUBB  A,#1
+       JC    oct1
+;      JC    intb0
+;      JNZ   oct
+       MOV   DPTR,#2003h
+;      SJMP  ret_link
+;intb0  MOV   DPTR,#2000h
+;      SJMP  ret_link
+oct    MOV   B,#8
+       MUL   AB
+       ADD   A,DPL
+       MOV   DPL,A
+       MOV   A,B
+       ADDC  A,DPH
+       MOV   DPH,A
+oct1:  MOV   A,#2            ; LJMP instruction
+       MOVX  @DPTR,A
+       INC   DPTR
+       MOV   A,R6
+       MOVX  @DPTR,A
+       INC   DPTR
+       MOV   A,R7
+       MOVX  @DPTR,A
+ret_link:
+       RET
+;______________________________________
+;addition de deux nombres de 16 bits
+;appel :add16s
+;entrées  :((R0)) sur 16 bits 
+;         :((R1)) sur 16 bits
+;résultat :((R0))+CY
+;RO pointeurs avec @RX=lsb 
+;R0,R1 inchangés
+;
+add16s MOV   A,@R0      ; start at low digits
+       ADD   A,@R1
+       MOV   @R0,A
+       INC   R0         ; advance pointers
+       INC   R1
+       MOV   A,@R0
+       ADDC  A,@R1      ; with CY from last ADD
+       MOV   @R0,A
+       DEC   R0         ; restore pointers
+       DEC   R1
+       RET
+;______________________________________
+;16 bits <- 0
+;appel :clr16
+;entrées  :((R0)) sur 16 bits 
+;sortie   :((R0)) = 0
+;R0 inchangé
+;
+clr16  MOV   @R0,#0
+       INC   R0
+       MOV   @R0,#0
+       DEC   R0
+       RET
+;______________________________________
+;shift à gauche un nombre de 16 bits
+;appel :shl16
+;entrées  :((R0)) sur 16 bits 
+;sortie   :((R0)) = 2*((R0))+CY
+;R0 inchangé
+;
+shl16  MOV   A,@R0      ; shift left 16 bit value
+       ADD   A,@R0
+       MOV   @R0,A
+       INC   R0
+       MOV   A,@R0
+       ADDC  A,@R0
+       MOV   @R0,A
+       DEC   R0
+       RET
+;______________________________________
+;lire, sans echo, des caractères hexa jusqu'à ce que le car. ne soit pas hexa
+;appel :get16
+;sortie : ((R0)) = resultat, (R0)=acc_a 
+;Procédures utilisées: clr16, get1h,shl16
+;
+get16  MOV   R0,#acc_a  ;
+       LCALL clr16      ; ((R0)) et ((R0+1)) =0
+get16l LCALL get1h     ; (A) = bin
+       JNC   OK16
+       MOV   R0,#acc_a
+       RET
+OK16:  MOV   R7,A
+       LCALL shl16      ; *16
+       LCALL shl16
+       LCALL shl16
+       LCALL shl16
+       MOV   A,R7
+       ADD   A,@R0
+       MOV   @R0,A
+       SJMP  get16l
+;______________________________________
+;lire deux caractères ASCII sur l'interface V24 et convertir en 1 octet binaire
+;sans echo
+;appel :get2h
+;résultat : ((R0)), (R0)=acc_a
+;si caractère non [0..F] CY = 1 et arrêt
+;procedure utilisée : get1h
+;
+get2h   MOV   R0,#acc_a  ;
+       LCALL get1h     ; (A) = 0000BBBB
+       JC    finh
+       rl    a           ;*16
+       rl    a
+       rl    a
+       rl    a
+       mov   @R0,A
+       lcall get1h
+       jc    finh
+       ADD   A,@R0
+       MOV   @R0,A
+finh   mov   R0,#acc_a
+       ret
+;______________________________________
+;lire deux caractères ASCII sur l'interface V24 et convertir en 1 octet binaire
+;avec echo
+;appel :get2he
+;résultat : ((R0))
+;si caractère non [0..F] CY = 1 et arrêt
+;procedure utilisée : get1he
+;
+get2he  mov   R0,#acc_a
+       lcall get1he      ; (A) = 0000BBBB
+       JC    finhe
+       rl    a           ;*16
+       rl    a
+       rl    a
+       rl    a
+       mov   @R0,A
+       lcall get1he
+       jc    finhe
+       ADD   A,@R0
+       MOV   @R0,A
+finhe   mov   R0,#acc_a
+       ret
+
+;______________________________________
+;echo sur la ligne V24. Si lf ajouter un cr
+;appel : echo
+;procédures utilisées : snd
+;
+echo   CJNE  A,#CR,EC1  ;
+       LCALL snd
+       MOV A,#LF  
+EC1    LJMP snd
+;______________________________________
+;lire,avec echo, un nombre hexa sur l'interface V24 par l'invitation : 'H>'
+;jusqu'à ce que le caractère ne soit pas hexa
+;appel : get16i
+;registres modifiés : A,B,PSW,R0..R7
+;résultat : ((R0)) = le nombre (sans le caractère de fin),(R0)=acc_a
+;         : (R6)=digit count
+;procédures utilisées :clr16,snd,get1he,shl16
+;
+get16i  MOV   R0,#acc_a  ; get hex value int acc_a , count digits in R6
+       LCALL clr16      ; value:=0
+       MOV   A,#'H'     ; send prompt
+       LCALL snd
+       MOV   A,#'>'
+       LCALL snd
+       MOV   R6,#0      ; count significant hex digits
+get16il LCALL get1he     ; get input character
+       JNC   OK1        ; go on if hexadecimal
+       MOV   R0,#acc_a  ; return address of accu also
+       RET
+OK1:   INC   R6         ; update number of digits
+       MOV   R7,A       ; save input value
+       LCALL shl16      ; acc_a:=acc_a * 16
+       LCALL shl16
+       LCALL shl16
+       LCALL shl16
+       MOV   A,R7
+       ADD   A,@R0      ; add input value ( no CY )
+       MOV   @R0,A
+       SJMP  get16il
+;______________________________________
+;Lire,avec echo, un nombre décimal sur l'interface V24 par l'invitation : 'D>'
+;jusqu'à ce que le caractère ne soit pas décimal
+;appel : get10i
+;registres modifiés : A,B,PSW,R0..R7
+;résultat : ((R0) = le nombre (sans le caractère de fin)
+;       : (R0) = acc_a
+;         : (R6) = digit number
+;procédures utilisées :clr16,snd,get1d
+;
+get10i  MOV   R0,#acc_a  ; get decimal value int ACCU0 , digits in R6
+       LCALL clr16      ; value:=0
+       MOV   A,#'D'     ; prompt
+       LCALL snd
+       MOV   A,#'>'
+       LCALL snd
+       MOV   R6,#0      ; significant hex digits
+get10il LCALL get1de
+       JNC   OK1d       ; go on if ok
+       MOV   R0,#acc_a  ; return address of accu also
+       RET
+OK1d   INC   R6         ; update digit count
+       MOV   R7,A       ; saves chr value
+       MOV   R2,acc_a   ; LSB
+       MOV   R3,acc_a+1 ; MSB
+       MOV   A,R2       ; multiply by 10 this value
+       MOV   B,#10
+       MUL   AB
+       MOV   acc_a,A
+       MOV   acc_a+1,B
+       MOV   A,R3
+       MOV   B,#10
+       MUL   AB
+       ADD   A,acc_a+1  ; add to old MSB
+       MOV   acc_a+1,A
+       MOV   A,R7       ; char value
+       ADD   A,acc_a    ; add input value
+       MOV   acc_a,A
+       MOV   A,acc_a+1
+       ADDC  A,#0       ; account for CY
+       MOV   acc_a+1,A
+       SJMP  get10il
+;______________________________________
+;Lire,avec ou sans echo, un caractère décimal sur l'interface V24
+;appel : get1d sans echo
+;      : get1de avec echo
+;résultat : (A) = le chiffre convert en binaire
+;            CY=1 si pas décimal
+;procédures utilisées : getupc,echo
+;
+get1d LCALL getupc     ; get decimal character, set CY if not
+       sjmp  skip
+get1de lcall getupc     
+       LCALL echo
+skip   CLR   C
+       SUBB  A,#'0'
+       JC    nodec
+       SUBB  A,#10
+       JNC   nodec
+       ADD   A,#10
+       CLR   C
+       RET
+nodec  SETB   C
+       RET
+;______________________________________
+;lecture d'un caractère hexa avec ou sans echo sur l'interface V24
+;appel : get1h sans echo
+;      : get1he avec echo
+;résultat : (A) = le caractère hexa convert en binaire
+;            CY=1 si pas hexa
+;procédures utilisées : getupc,echo
+;
+get1h LCALL getupc
+       SJMP  GOON2
+get1he LCALL getupc
+       LCALL echo
+GOON2  CLR   C
+       SUBB  A,#'0'
+       JC    hcor1
+       SUBB  A,#10
+       JNC   nohex1
+       ADD   A,#10
+ISHEX  CLR   C
+       RET
+nohex1 SUBB  A,#7
+       JC    hcor2
+       SUBB  A,#6
+       JNC   hcor3
+       ADD   A,#16
+       SJMP  ISHEX
+nohex: SETB   C
+       RET
+hcor1  ADD    A,#'0'
+       SJMP nohex
+hcor2  ADD    A,#'0'+17
+       SJMP nohex
+hcor3  ADD    A,#'0'+17+7
+       SJMP nohex
+;
+;______________________________________
+;envoyer un texte sur l'interface V24
+;appel : stxt
+;données  : (dptr) = texte terminé par 0
+;registres modifiés : A,DPTR
+;procédure utilisée : snd
+;
+stxt   EQU   $
+       MOV   A,#0
+       MOVC  A,@A+DPTR
+       JZ    ETXT
+       LCALL snd
+       INC   DPTR
+       SJMP  stxt
+ETXT   RET
+;______________________________________
+;envoyer un espace sur l'interface V24
+;appel : blank
+;registres modifiés : A,DPTR
+;procédure utilisée : snd
+;
+blank  MOV   A,#' '     ; send blank
+       SJMP  snd
+;______________________________________
+;envoyer deux caractères hexa pour un octet binaire, sur l'interface V24
+;appel : byte
+;entrée   :(A) en binaire
+;registres modifiés : A
+;procédure utilisée : snd
+;
+byte   PUSH  ACC        ; send byte hexadecimal , destroy ACC only
+       SWAP  A
+       LCALL NIBBLE
+       POP   ACC
+NIBBLE ANL   A,#0FH
+       ADD   A,#246
+       JC    HEXOUT
+       ADD   A,#58
+       SJMP  snd
+HEXOUT ADD   A,#65
+       SJMP  snd
+;______________________________________
+;envoyer un crlf sur l'interface V24
+;appel : crlf
+;registres modifiés : A
+;procédure utilisée : snd
+;
+crlf   MOV   A,#CR
+       LCALL snd
+       MOV   A,#LF
+       LCALL snd
+       RET
+;______________________________________
+;lire un caractère majuscule sur l'interface V24
+;appel : getupc
+;résultat : (A) avec miniscules transformées en majuscules
+;registres modifiés : A,PSW
+;procédure utilisée : getchr,upcase
+;
+getupc LCALL getchr     ; get upper case character from serial port
+       LCALL upcase
+       RET
+;______________________________________
+;conversion miniscule en majuscule
+;appel : upcase
+;donnée et résultat : (A)
+;registres modifiés : néant
+;
+upcase CLR   C          ; convert character to upper case letter
+       SUBB  A,#'a'
+       JC    UPC1       ; char <97  a-> 0    z->25
+       SUBB  A,#26
+       JC    UPC2       ; (char-a)<26  , do upcase translation
+       ADD   A,#26+'a'
+       RET
+UPC2   ADD   A,#26+'A'
+       RET
+UPC1   ADD  A,#'a'
+       RET
+;______________________________________
+;envoyer un caractère sur l'interface V24
+;appel : snd
+;registres modifié : aucun
+;
+snd:
+       PUSH  IE
+       CLR   ES
+       CLR   EX0+DBGINT+DBGINT
+       JNB   SCON.1,$  ; must not destroy any reg
+       CLR   SCON.1
+       MOV   SBUF,A
+       pop   IE
+       RET
+;______________________________________
+;lire un caractère ssur l'interface V24
+;appel : getchr
+;résultat :(A)
+;registre modifié : PSW
+;
+GETC0: CALL  INT		; interrupt
+getchr EQU $            	; get character from serial port
+GETC1: CALL  GETCC
+       CJNE  A,#04h,GETCX 	; interrupt if Ctrl-D hit
+       MOV   A,R0
+       PUSH  ACC
+       MOV   R0,#MODE
+       MOV   A,@R0
+       MOV   @R0,#'N'
+       CLR   ACC.5		; to upper case
+       CJNE  A,#'C',GETC2
+       MOV   R0,#SAVERET
+       MOV   A,@R0
+       PUSH  ACC
+       INC   R0
+       MOV   A,@R0
+       PUSH  ACC
+       MOV   R0,#SAVESP
+       MOV   A,@R0
+       DEC   A
+       MOV   R0,A
+       POP   ACC
+       MOV   @R0,A
+       INC   R0
+       POP   ACC
+       MOV   @R0,A
+GETC2: POP   ACC
+       MOV   R0,A
+       SJMP  GETC0
+GETCX: RET
+
+GETCC: PUSH  IE
+       CLR   EX0+DBGINT+DBGINT
+       JNB   SINTDBG,GETCC1
+       CLR   ES
+GETCC1:JNB   SCON.0,GETCC1
+       CLR   SCON.0
+       MOV   A,SBUF
+       POP   IE
+       RET
+;______________________________________
+;
+;Utilitaires utilisateur
+;
+;______________________________________
+;______________________________________
+;short time delay
+;appel : stime
+;fonction :
+;entrée   :
+;sortie   :
+;
+stime   MOV   A,DPL     ; 6+DPTR*15 microsec (MOV DPTR + CALL adds 4)
+	ORL   A,DPH
+	JZ    SRET1
+	SETB  C
+	MOV   A,DPL
+	SUBB  A,#0
+	MOV   DPL,A
+	MOV   A,DPH
+	SUBB  A,#0
+	MOV   DPH,A
+	NOP
+	NOP
+	SJMP  stime
+SRET1   RET
+;______________________________________
+;long Time delay
+;appel :ltime
+;fonction :
+;entrée   :
+;sortie   :
+;
+ltime   MOV   A,DPL     ; 6+DPTR*(15 + TIME0) micros (MOV DPTR + CALL add 4)
+	ORL   A,DPH     ; 6+DPTR*1000 micros
+	JZ    SRET2
+	SETB  C
+	MOV   A,DPL
+	SUBB  A,#0
+	MOV   DPL,A
+	MOV   A,DPH
+	SUBB  A,#0
+	MOV   DPH,A
+	LCALL TIME0
+	SJMP  ltime
+SRET2   RET
+;
+n1      EQU   196
+TIME0   MOV   DPLSAV,#n1      ; (n1+1)*5 microsec=985 micros
+	NOP
+TIME0L  NOP
+	NOP
+	NOP
+	DJNZ  DPLSAV,TIME0L
+	RET
+;______________________________________
+;addition 16 bits+16 bits
+;appel : add16
+;entrées  :((R0)) et ((R1))
+;sortie   :((R0)) + CY avec (R0)=op1
+;R0 et R1 pointeurs avec @RX=lsb et @(RX+1)=msb
+;(op1)=lsb (op1+1)=msb
+;
+add16   EQU $              ; @R0 + @R1 goes to op1
+	MOV   A,@R0
+	ADD   A,@R1
+	MOV   op1,A
+	INC   R0
+	INC    R1
+	MOV   A,@R0
+	ADDC  A,@R1
+	MOV   op1+1,A
+	MOV   R0,#op1
+	RET
+;______________________________________
+;soustraction 16 bits-16 bits
+;appel : sub16
+;entrées  :((R0)) et ((R1))
+;sortie   :((R0)) avec (R0)=op1
+;R0 et R1 pointeurs avec @RX=lsb et @(RX+1)=msb
+;
+sub16   EQU $              ; @R0 - @R1 goes to op1
+	CLR   C
+	MOV   A,@R0
+	SUBB  A,@R1
+	MOV   op1,A
+	INC   R0
+	INC   R1
+	MOV   A,@R0
+	SUBB  A,@R1
+	MOV   op1+1,A
+	MOV   R0,#op1
+	RET
+;______________________________________
+;multiplication 16 bits*16 bits=32 bits
+;appel : mul16
+;entrées  :((R0)) sur 16 bits 
+;         :((R1)) sur 16 bits
+;sortie   :((R0)) 32 bits avec (R0)=prod
+;R0 et R1 pointeurs avec @RX=lsb 
+;
+mul16   EQU $                 ; @R0 * @R1 goes to prod
+	MOV   op1+0,@R0
+	MOV   op2+0,@R1
+	INC   R0
+	INC   R1
+	MOV   op1+1,@R0
+	MOV   op2+1,@R1
+;
+mul16b MOV  A,op1+0    ; 16*16 multply -> 32 bit  ( approx. 70 microsec )
+       MOV  B,op2+0
+       MUL  AB          ; low * low byte
+       MOV  prod+0,A
+       MOV  prod+1,B
+       MOV  A,op1+1
+       MOV  B,op2+1
+       MUL  AB          ; high * high byte
+       MOV  prod+2,A
+       MOV  prod+3,B
+       MOV  A,op1+1    ; mixed prod 1
+       MOV  B,op2+0
+       MUL  AB
+       ADD  A,prod+1    ; add 3 byte wide
+       MOV  prod+1,A
+       MOV  A,prod+2
+       ADDC A,B
+       MOV  prod+2,A
+       MOV  A,prod+3
+       ADDC A,#0
+       MOV  prod+3,A
+       MOV  A,op1+0    ; mixed prod 2
+       MOV  B,op2+1
+       MUL  AB
+       ADD  A,prod+1    ; add 3 byte wide
+       MOV  prod+1,A
+       MOV  A,prod+2
+       ADDC A,B
+       MOV  prod+2,A
+       MOV  A,prod+3
+       ADDC A,#0
+       MOV  prod+3,A
+;
+       MOV   R0,#prod       ; result pointer in R0
+       RET
+;______________________________________
+;division 32 bits/16 bits=16 bits + reste sur 16 bits (sans signe!)
+;appel : div16
+;entrées  :((R0)) sur 32 bits 
+;          ((R1)) sur 16 bits
+;sortie   :((R0)) quotient sur 32 bits
+;         :((R1)) reste sur 16 bits
+;R0 et R1 pointeurs avec @RX=lsb 
+;
+div16   MOV   prod+0,@R0
+	INC   R0
+	MOV   prod+1,@R0
+	INC   R0
+	MOV   prod+2,@R0
+	INC   R0
+	MOV   prod+3,@R0
+	MOV   divi,@R1
+	INC   R1
+	MOV   divi+1,@R1
+;        
+div16b MOV   prod+4,#00H     ; clear extension  approx. 1000 microsec
+       MOV   divcnt,#16      ; 15 normal steps, last step: remainder !
+DIVLP  LCALL SHR5
+       LCALL TRYSUB          ; try and perform subtraction, results in CY
+       LCALL SHLQ            ; shift CY into quotIENT
+       DJNZ  divcnt,DIVLP
+       MOV   R0,#quot       ; quotient pointer
+       MOV   R1,#prod+2    ; remainder pointer
+       RET
+;
+TRYSUB EQU $
+       CLR  C           ; no borrow
+       MOV  A,prod+2
+       SUBB A,divi+0
+       MOV  A,prod+3
+       SUBB A,divi+1
+       MOV  A,prod+4    ; is accu extension
+       SUBB A,#0
+       JNC  SUBIT
+       RET
+SUBIT  MOV  A,prod+2    ; now really subtract  , we have no borrow from before
+       SUBB A,divi+0
+       MOV  prod+2,A
+       MOV  A,prod+3
+       SUBB A,divi+1
+       MOV  prod+3,A
+       MOV  A,prod+4    ; is accu extension
+       SUBB A,#0
+       MOV  prod+4,A
+       RET
+;
+SHLQ   CPL C
+       MOV  A,quot+0    ; use carry from before and shift into quotient
+       RLC  A
+       MOV  quot+0,A
+       MOV  A,quot+1
+       RLC  A
+       MOV  quot+1,A
+       RET
+;
+SHR5   EQU $
+       CLR  C           ; shift 5 bytes = product+ACC 17 bit extension
+       MOV  A,prod+0
+       RLC  A
+       MOV  prod+0,A
+       MOV  A,prod+1
+       RLC  A
+       MOV  prod+1,A
+       MOV  A,prod+2
+       RLC  A
+       MOV  prod+2,A
+       MOV  A,prod+3
+       RLC  A
+       MOV  prod+3,A
+       MOV  A,prod+4
+       RLC  A
+       MOV  prod+4,A
+       RET
+;        
+;______________________________________
+;valeur absolue d'un nombre sur 16 bits
+;appel : abs16
+;entrées  :((R0)) sur 16 bits 
+;sortie   :((R0)) sur 16 bits
+;          cy=1 si le nb était < 0
+;RO pointeurs avec @RX=lsb 
+;R0 inchangé
+;
+abs16  INC  R0              ; is ABS set CY if negative
+       MOV  A,@R0
+       DEC  R0              ; mod mbe 2010-03-30: also restore r0 if positive
+       JNB  ACC.7,noneg1
+;      DEC  R0		    ; mod mbe 2010-03-30
+       SJMP neg16
+noneg1 CLR  C
+       RET
+;______________________________________
+;valeur négative d'un nombre sur 16 bits
+;appel : neg16
+;entrées  :((R0)) sur 16 bits 
+;sortie   :((R0)) sur 16 bits
+;RO pointeurs avec @RX=lsb 
+;R0 inchangé
+;
+;neg16  MOV  A,@R0           ; set negative @ R0
+;       XRL  A,#0FFH
+;       ADD  A,#1
+;       MOV  @R0,A
+;       INC  R0
+;       MOV  A,@R0
+;       XRL  A,#0FFH
+;       ADDC A,#0
+;       MOV  @R0,A
+;       SETB C
+;       RET
+
+; mod mbe 2010-03-30: no constant + also restore r0 
+neg16	CLR	A
+	CLR	C
+	SUBB	A,@R0
+	MOV	@R0,A
+	INC	R0
+	CLR	A
+	SUBB	A,@R0
+	MOV	@R0,A
+	DEC	R0
+	SETB	C
+	RET
+
+;________________________________________
+;afficher en hexa 4 digit le contenu de dptr
+;appel : hex16
+;entrée : (dptr)
+;procedure utilisée : byte
+;
+hex16   equ     $
+	mov     a,dph
+	lcall   byte
+	mov     a,dpl
+	lcall   byte
+	ret
+;_______________________________________
+;Afficher un nombre de 32 bits en décimal
+;appel : dsp32d
+;entrées  :((R0)) sur 32 bits 
+;RO pointeurs avec @RX=lsb 
+;Registres mofdifiés : A, PSW, R0..R7
+;Procédures utilisées: iniacc, bindec, dspx
+;
+dsp32d EQU $            ; long 32 bit dec display of value at R0
+       LCALL iniacc      ; prepare conversion buffer
+       LCALL bindec      ; convert 4 bytes
+       LCALL bindec
+       LCALL bindec
+       LCALL bindec
+       MOV   R1,#acc_a+5
+       MOV   R6,#5
+       LCALL dspx      ; display string
+       RET
+;______________________________________
+;Afficher un nombre de 32 bits en hexadécimal
+;appel : dsp32h
+;entrées  :((R0)) sur 32 bits 
+;RO pointeurs avec @RX=lsb 
+;Registres mofdifiés : A, PSW, R0..R7
+;Procédures utilisées: byte
+;
+dsp32h EQU $            ; long 32 bit hex display of value at R0
+       INC   R0
+       INC   R0
+       INC   R0
+       MOV   A,@R0      ; point to most significant byte
+       LCALL byte
+       DEC   R0
+       MOV   A,@R0
+       LCALL byte
+       DEC   R0
+       MOV   A,@R0
+       LCALL byte
+       DEC   R0
+       MOV   A,@R0
+       LCALL byte
+       RET
+;______________________________________
+;Afficher un nombre de 16 bits en hexadécimal
+;appel : dsp16h
+;entrées  :((R0)) sur 16 bits 
+;RO pointeurs avec @RX=lsb 
+;Registres mofdifiés : A, PSW, R0..R7
+;Procédures utilisées: byte
+;
+dsp16h EQU $            ; 16 bit display hexadecimal
+       INC R0           ; point to higher byte
+       MOV   A,@R0
+       LCALL byte       ; display
+       DEC R0
+       MOV   A,@R0
+       LCALL byte       ; display lower byte
+       RET
+;______________________________________
+;Afficher un nombre de 16 bits en décimal
+;appel : dsp16d
+;entrées  :((R0)) sur 16 bits 
+;RO pointeurs avec @RX=lsb 
+;Registres mofdifiés : A, PSW, R0..R7
+;Procédures utilisées: iniacc, bindec, dspx
+;
+dsp16d EQU   $          ; word 16 bit dec display of value at R0
+       LCALL iniacc      ; prepare conversion
+       LCALL bindec      ; convert two bytes
+       LCALL bindec
+       MOV   R1,#acc_a+3
+       MOV   R6,#3
+       LCALL dspx      ; display 3 BCD bytes so 65535 fits
+       RET
+;______________________________________
+;init conversion  bin -> déc 
+;acc_a <- 0 et acc_b <- 1
+;
+iniacc  MOV   A,#0
+       MOV   acc_a+0,A 
+       MOV   acc_a+1,A
+       MOV   acc_a+2,A
+       MOV   acc_a+3,A
+       MOV   acc_a+4,A
+       MOV   acc_b+0,#1
+       MOV   acc_b+1,A
+       MOV   acc_b+2,A
+       MOV   acc_b+3,A
+       MOV   acc_b+4,A
+       RET
+;______________________________________
+;Conversion bin -> déc
+;entrées  :((R0)) sur 8 bits
+;RO est incrémenté pour conversions en cascade
+;Procédures utilisées: byte
+;
+bindec  MOV   A,@R0      ; convert Byte at R0 , inc R0
+       INC   R0
+DCNVb1 MOV   R2,A       ; convert Byte ACC
+       MOV   R6,#8      ; convert R2 using acc_a and acc_b
+dCNV1  MOV   A,R2       ; get bit from R2
+       RRC   A
+       MOV   R2,A
+       JNC   dCNV2
+       LCALL ADD1       ; if CY add acc_b to acc_a using BCD
+dCNV2  LCALL DOUBL1     ; acc_b:=2*acc_b
+       DJNZ  R6,dCNV1   ; loop until all 8 bits done
+       RET
+;
+DOUBL1 MOV   A,acc_b+0  ; acc_b:=2*acc_b , BCD coded 5 bytes
+       ADD   A,acc_b+0
+       DA    A
+       MOV   acc_b+0,A
+       MOV   A,acc_b+1
+       ADDC  A,acc_b+1
+       DA    A
+       MOV   acc_b+1,A
+       MOV   A,acc_b+2
+       ADDC  A,acc_b+2
+       DA    A
+       MOV   acc_b+2,A
+       MOV   A,acc_b+3
+       ADDC  A,acc_b+3
+       DA    A
+       MOV   acc_b+3,A
+       MOV   A,acc_b+4
+       ADDC  A,acc_b+4
+       DA    A
+       MOV   acc_b+4,A
+       RET
+;
+ADD1   MOV   A,acc_a+0  ; acc_a:=acc_a+acc_b , bcd coded 5 bytes
+       ADD   A,acc_b+0
+       DA    A
+       MOV   acc_a+0,A
+       MOV   A,acc_a+1
+       ADDC  A,acc_b+1
+       DA    A
+       MOV   acc_a+1,A
+       MOV   A,acc_a+2
+       ADDC  A,acc_b+2
+       DA    A
+       MOV   acc_a+2,A
+       MOV   A,acc_a+3
+       ADDC  A,acc_b+3
+       DA    A
+       MOV   acc_a+3,A
+       MOV   A,acc_a+4
+       ADDC  A,acc_b+4
+       DA    A
+       MOV   acc_a+4,A
+       RET
+;______________________________________
+;Afficher un nombre de (R6) chiffres 
+;appel : dspx
+;entrées  :((R1)) nombre à afficher, R1 est décrémenté car on affiche d'abord le msb
+;          Au départ R0 pointe une case au dessus du MSB
+;          par exemple pour afficher 3 chiffres (R6)=3 et (R0)=(adr+3) 
+;          pour afficher respectivement (adr+2), (adr+1) et (adr)
+;         :(R6)=nb de chiffres
+;Procédures utilisées: byte
+;
+dspx   NOP              ; display R6 bytes in decreasing order @R1
+dDSPlp DEC   R1         ; used for decimal or hexadecimal output
+       MOV   A,@R1
+       LCALL byte
+       DJNZ  R6,dDSPlp
+       RET
+;______________________________________
+;snap resisters
+;appel : snap
+;fonction :afficher le contenu actuel des registres
+;entrée   :néant
+;sortie   :néant
+;procedures : stxt,byte,blank
+;
+snap    EQU $                ; display snapshot
+	MOV   DPLSAV,DPL     ; PSW and ACC have already been saved
+	MOV   DPHSAV,DPH
+	MOV   DPTR,#SNAPTXT
+	LCALL stxt
+;
+	MOV   A,ACCSAV       ; display ACCUS
+	LCALL byte
+	LCALL blank
+;
+	MOV   A,B
+	LCALL byte
+	LCALL blank
+;
+	LCALL blank          ; PSW comes from PSWSAV
+	MOV   A,PSWSAV
+	LCALL byte
+	LCALL blank
+;
+	LCALL blank          ; display SP
+	MOV   A,SP
+	LCALL byte
+	LCALL blank
+;
+	MOV   A,DPHSAV       ; display DPH,DPL
+	LCALL byte
+	MOV   A,DPLSAV
+	LCALL byte
+;
+	LCALL blank          ; display R0 .. R7
+	MOV   A,R0
+	LCALL byte
+	LCALL blank
+	MOV   A,R1
+	LCALL byte
+	LCALL blank
+	MOV   A,R2
+	LCALL byte
+	LCALL blank
+	MOV   A,R3
+	LCALL byte
+	LCALL blank
+	MOV   A,R4
+	LCALL byte
+	LCALL blank
+	MOV   A,R5
+	LCALL byte
+	LCALL blank
+	MOV   A,R6
+	LCALL byte
+	LCALL blank
+	MOV   A,R7
+	LCALL byte
+	LCALL crlf
+;
+	MOV   DPH,DPHSAV
+	MOV   DPL,DPLSAV
+	MOV   A,ACCSAV
+	MOV   PSW,PSWSAV
+	RET
+;______________________________________
+;tester si un caractère est présent sur l'uart
+;appel : testc
+;sortie : (a)=0 pas de caract. (a)=1 caract présent
+;
+testc   jb      scon.0,isthere
+	mov     a,#0
+	ret
+isthere mov     a,#1
+	ret
+;_______________________________________
+;
+;_______________________________________
+;
+	  rseg      const
+;
+UPTXT  DB    'Auto-run usercode...',CR,LF,0
+ITXT   DB    'INTERRUPT: ',0
+ITXT1  DB    'IE0',CR,LF,0
+ITXT2  DB    'IE1',CR,LF,0
+ITXT3  DB    'TF0',CR,LF,0
+ITXT4  DB    'TF1',CR,LF,0
+ITXT5  DB    'RI/TI',CR,LF,0
+ITXT6  DB    'SI',CR,LF,0
+ITXT7  DB    'CT0',CR,LF,0
+ITXT8  DB    'CT1',CR,LF,0
+ITXT9  DB    'CT2',CR,LF,0
+ITXT10 DB    'CT3',CR,LF,0
+ITXT11 DB    'ADCI',CR,LF,0
+ITXT12 DB    'CM0',CR,LF,0
+ITXT13 DB    'CM1',CR,LF,0
+ITXT14 DB    'CM2',CR,LF,0
+ITXT15  DB   'T2B0',CR,LF,0
+SNAPTXT DB    CR,LF,' A  B PSW  SP DPTR R0 R1 R2 R3 R4 R5 R6 R7'
+	DB    CR,LF,0
+txterror db   CR,LF,'error',0
+
+
+TITLE:	db    	0Dh,0Ah
+       	db    	'** Gmon51 v2.0b3 - (c) 15-Mar-2015 GmEsoft **',0Dh,0Ah,22h
+MSYSTEM:db	0Ah
+	db	'System: "'
+M8052:	db	'8051/52"'
+M80C552:db	'80C552"'
+MUSING:	db	' - Debug using INT"'
+MSERINT:db	' + SERINT"'
+
+	end

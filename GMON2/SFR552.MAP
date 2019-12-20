@@ -1,0 +1,132 @@
+
+
+data
+           t3                      00FF
+           ;Timer 3
+           pwmp                    00FE    ;Pulse Width Modulation Prescaler
+           pwm1                    00FD    ;Pulse Width Modulation register 1
+           pwm0                    00FC    ;Pulse width Modulation register 1
+           ip0                     00B8    ;Interrupt Priority 0  (* b8h --> bfH)
+           ;
+           ip1                     00F8    ;Interrupt Priority 1  (* f8h --> ffH)
+           ;
+           rte                     00EF    ;Reset/Toggle Enable
+           ;tp47,tp46,rp45,rp44,rp43,rp42,rp41,rp40
+           ;
+           ste                     00EE    ;SeT Enable
+           ;tg47,tg46,sp45,sp44,sp43,sp42,sp41,sp40
+           ;
+           tmh2                    00ED    ;TiMer High 2  (#)
+           tml2                    00EC    ;TiMer Low 2   (#)
+           ctcon                   00EB    ;CapTure CONtrol
+           ;ctn3,ctp3,ctn2,ctp2,ctn1,ctp1,ctn0,ctp0
+           ;
+           tm2con                  00EA    ;TiMer 2 CONtrol
+           ;t2is1,t2is0,t2er,t2b0,t2p1,t2p0,t2ms1,t2ms0
+           ;
+           ien0                    00A8
+           ;
+           ;redefinitions des labels ie (8052) pour ien0 (80552)
+           ;
+           ;
+           ien1                    00E8    ;Interrupt ENable 1  (* e8h --> efh)
+           ;
+           s1adr                   00DB    ;Serial 1 ADRess  (*)
+           ;
+           s1dat                   00DA    ;Serial 1 DATa
+           s1sta                   00D9    ;Serial 1 STAtus  (#)
+           ;sc4,sc3,sc2,sc1,sc0,0,0,0
+           ;
+           s1con                   00D8    ;Serial 1 CONtrol  (* d8h --> dfh)
+           ;
+           cth3                    00CF    ;CapTure High 3  (#)
+           cth2                    00CE    ;CapTure High 2  (#)
+           cth1                    00CD     ;CapTure High 1  (#)
+           cth0                    00CC    ;CapTure High 0  (#)
+           cmh2                    00CB    ;CoMpare High 2
+           cmh1                    00CA    ;CoMpare High 3
+           cmh0                    00C9    ;CoMpare High 0
+           tm2ir                   00C8    ;TiMer 2 Interrupt flag Register  (* c8h --> cfh)
+           ;
+           adch                    00C6    ;Analog to Digital Converter High  (#)
+           adcon                   00C5    ;ADc CONtrol  not bit adressable !!!
+           ;adc.1,adc.0,adex,adci,adcs,aadr2,aadr1,aadr0
+           ;
+           p5                      00C4    ;Port 5 (#)
+           ;adc7,adc6,adc5,adc4,adc3,adc2,adc1,adc0
+           ;
+           p4                      00C0    ;Port 4  (* c0h --> c7h)
+           ;
+           ctl3                    00AF    ;CapTure Low 3  (#)
+           ctl2                    00AE    ;CapTure Low 2  (#)
+           ctl1                    00AD    ;CapTure Low 1  (#)
+           ctl0                    00AC    ;CapTure LOw 0  (#)
+           cml2                    00AB    ;CoMpare Low 2
+           cml1                    00AA    ;CoMpare Low 1
+           cml0                    00A9    ;CoMpare Low 0
+           ;
+           s0buf                   0099     ;Serial 0 data BUFfer
+           ;
+           ;
+           pcon                    0087     ;Power CONtrol
+
+bit
+           px0                     00B8.0
+           pt0                     00B8.1
+           px1                     00B8.2
+           pt1                     00B8.3
+           ps0                     00B8.4
+           ps1                     00B8.5
+           pad                     00B8.6
+           pct0                    00F8.0
+           pct1                    00F8.1
+           pct2                    00F8.2
+           pct3                    00F8.3
+           pcm0                    00F8.4
+           pcm1                    00F8.5
+           pcm2                    00F8.6
+           pt2                     00F8.7
+           ead                     00A8.6   ;(&)
+           es1                     00A8.5   ;(&)
+           es0                     00A8.4   ;(&)
+           ect0                    00E8.0
+           ect1                    00E8.1
+           ect2                    00E8.2
+           ect3                    00E8.3
+           ecm0                    00E8.4
+           ecm1                    00E8.5
+           ecm2                    00E8.6
+           et2                     00E8.7
+           cr0                     00D8.0
+           cr1                     00D8.1
+           aa                      00D8.2
+           si                      00D8.3
+           sto                     00D8.4
+           sta                     00D8.5
+           ens1                    00D8.6
+           cti0                    00C8.0
+           cti1                    00C8.1
+           cti2                    00C8.2
+           cti3                    00C8.3
+           cmi0                    00C8.4
+           cmi1                    00C8.5
+           cmi2                    00C8.6
+           t2ov                    00C8.7
+           cmsr0                   00C0.0
+           cmsr1                   00C0.1
+           cmsr2                   00C0.2
+           cmsr3                   00C0.3
+           cmsr4                   00C0.4
+           cmsr5                   00C0.5
+           cmt0                    00C0.6
+           cmt1                    00C0.7
+           ;ct0i                   p1.0
+           ;ct1i                   p1.1
+           ;ct2i                   p1.2
+           ;ct3i                   p1.3
+           ;t2                     p1.4
+           ;rt2                    p1.5
+           ;scl                    p1.6
+           ;sda                    p1.7
+           gc                      00DB.0 ; |<-- slave address -->|gc|
+

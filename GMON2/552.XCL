@@ -1,0 +1,16 @@
+-! Linker control file
+   Linker command line: xlink -f 552
+   fev 94 for emon and 80C552  -!
+-c8051
+-D_R=0
+-Z(BIT)bit=0
+-Z(DATA)data=30
+-Z(DATA)datasim=7F
+-!  Setup "idata" segments (usually loaded after "data") -!
+-Z(IDATA)idata=80
+-Z(XDATA)xdata=0
+-Z(CODE)code,const=0
+-! 16K ram in code and data space for SIMCAD -!
+-Z(XDATA)ramcoda=2000
+-! 16K EPROM in code and data space for SIMCAD -!
+-Z(CODE)romcoda=8000
