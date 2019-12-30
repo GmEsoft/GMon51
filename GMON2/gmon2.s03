@@ -1503,12 +1503,12 @@ COMS:	push	18h
 	push	1Ah
 	push	1Bh
 	call	RHEXW
-	call	DDISNL
 	mov	a,r0
 	jz	COMS1			;no value => disp page of instr
 	mov	18h,r2
 	mov	19h,r3
 	call	RHEXW
+	call	DDISNL
 	mov	1Ah,r2
 	mov	1Bh,r3
 	call	DASM1
